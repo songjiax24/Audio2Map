@@ -1,0 +1,14 @@
+# Preprocessing defaults
+
+hop_ms: 10
+sample_rate: 44100
+n_mels: 80
+mel_dtype: float16
+
+# Per set: keep the mania 4K chart with highest OverallDifficulty
+selection: highest_od
+
+# Output layout under processed/
+#   {sid}.npz      — mel (T,n_mels), event_* arrays
+#   {sid}.meta.json
+#   manifest.jsonl

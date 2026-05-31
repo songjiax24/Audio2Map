@@ -1,0 +1,12 @@
+# Multi-chart trial training (requires precomputed audio_grid)
+
+steps: 3000
+batch_size: 8
+samples_per_chart: 2
+lr: 0.0003
+d_model: 256
+n_layers: 4
+n_heads: 4
+log_every: 50
+save_every: 500
+require_grid: true

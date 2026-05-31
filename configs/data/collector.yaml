@@ -1,0 +1,8 @@
+# Data collection defaults (reserved for future Hydra integration)
+
+raw_subdir: raw
+list_type: new          # Sayobot T=2
+list_class: ranked      # Sayobot C=1 (Ranked & Approved)
+page_size: 50
+list_delay: 1.0
+download_delay: 2.0

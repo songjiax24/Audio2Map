@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "audio2map"
+version = "0.1.0"
+description = "Generate osu!mania 4K charts from audio and global conditions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "librosa>=0.10.0",
+    "numpy>=1.24.0",
+    "requests>=2.28.0",
+    "rosu-pp-py>=4.0.0",
+    "soundfile>=0.12.0",
+    "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+]
+train = [
+    "torch>=2.1",
+]
+
+[project.scripts]
+audio2map-collect = "audio2map.data.collector.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["audio2map*"]
+
+[tool.setuptools.package-data]
+audio2map = [
+    "third_party/ett/official_minacalc_runner",
+    "third_party/ett/README.md",
+    "pattern_analyser/config_defaults.json",
+    "pattern_analyser/README.md",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

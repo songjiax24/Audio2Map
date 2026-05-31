@@ -1,0 +1,19 @@
+# Debug overfit on a single chart (see scripts/train_debug_overfit.py)
+
+d_model: 256
+n_heads: 4
+n_layers: 4
+dropout: 0.0
+
+lr: 0.0003
+steps: 500
+batch_size: 1
+log_every: 50
+
+window_bars_choices: [8]
+pre_event_margin_bars: 4
+post_event_margin_bars: 4
+
+# Example chart with pre-offset events
+# osu: /root/autodl-tmp/audio2map_data/raw/2127527/seatrus - Abendstern (Maiiy) [Insane].osu
+# start_bar: -1

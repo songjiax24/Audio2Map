@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+
+# Environments
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Data & artifacts (live on data disk, never commit)
+*.mp3
+*.ogg
+*.wav
+*.flac
+*.m4a
+*.opus
+*.osu
+*.osz
+
+# Logs & runtime state
+*.log
+
+# ML artifacts (future)
+*.pt
+*.pth
+*.ckpt
+wandb/

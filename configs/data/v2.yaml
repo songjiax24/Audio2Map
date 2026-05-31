@@ -1,0 +1,13 @@
+# v2 training / preprocessing defaults (see docs/v2_spec.md)
+
+sample_rate: 22050
+feature_dim: 142
+
+window_bars_choices: [8]
+pre_event_margin_bars: 4
+post_event_margin_bars: 4
+
+# Inference overlap (planned)
+context_bars: 4
+keep_bars: 4
+future_bars: 0
