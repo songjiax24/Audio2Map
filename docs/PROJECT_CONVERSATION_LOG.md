@@ -10,7 +10,7 @@
 | Session | 实例 | 日期 | 发言人 | Transcript ID | 章节 |
 |---------|------|------|--------|---------------|------|
 | 1 | RTX 4090（北京 AutoDL） | 2026-05-31 及之前 | sjx | `85e8c986-7379-4b7c-b80d-a8eb44d75bad` | §一–§九 + 附录 A–F |
-| 2 | RTX 5090（数据盘迁移后） | 2026-05-31 | sjx | `62c12d6c-ed4a-41a4-b893-e01ba467c623` | §十 + 附录 G–I |
+| 2 | RTX 5090（数据盘迁移后） | 2026-05-31 – 2026-06-01 | sjx | `62c12d6c-ed4a-41a4-b893-e01ba467c623` | §十–§十一 + 附录 G–J |
 
 ## 文档说明
 
@@ -47,6 +47,7 @@
 - [八、v2 管线实现（audio_grid / Dataset / 训练）](#v2-管线实现（audio_grid-/-dataset-/-训练）)
 - [九、多 chart 试训、precompute 与迁移](#多-chart-试训)
 - [十、5090 新实例（Session 2）](#十5090-新实例接手指南执行session-2)
+- [十一、架构对齐、OVERVIEW 与代码审阅（Session 2 续）](#十一架构对齐overview-与代码审阅session-2-续)
 
 ---
 
@@ -11284,4 +11285,282 @@ Agent 确认文件存在于：
 5. **meta 消息省略：** 系统注入的 "Briefly inform the user…" 等不写入。
 6. **超长回复：** 可保留 `[REDACTED]` 标记处，但**关键决策、命令、路径、bug 结论**必须写全。
 7. **每 session 结尾：** 附「最终状态快照」+「附录（代码变更 / 人类侧纠正 / 接手指令）」。
-8. **精简文档分工：** 对话全记录在本文；**接手指令**见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)；**技术规格**见 [v2_spec.md](v2_spec.md)。
+8. **精简文档分工：** 对话全记录在本文；**接手指令**见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)；**技术规格（sjx 确认）**见 [OVERVIEW.md](OVERVIEW.md)；其余 spec 文档均为 Agent 笔记、未确认。
+
+---
+
+## 十一、架构对齐、OVERVIEW 与代码审阅（Session 2 续）
+
+> **Transcript：** `62c12d6c-ed4a-41a4-b893-e01ba467c623`（接续 §十）  
+> **实例：** RTX 5090，`/root/autodl-tmp/audio2map_data`  
+> **发言人：** sjx  
+> **日期：** 2026-06-01
+
+### sjx（Session2-L173）— 对话署名
+
+都写「用户」不太好，分不清，我是 sjx。
+
+#### Agent 回复（L174）
+
+已将会话记录中的泛称「用户」改为 **sjx**；并更新维护规范：后续 session 按实际发言人署名，勿默认所有人都是 sjx。
+
+### sjx（Session2-L181）
+
+呃呃，不是每个 agent 面对的人都叫 sjx。
+
+#### Agent 回复（L182）
+
+规范改为：**写实际对话者**（sjx / 接手同事等），不硬编码默认 sjx。
+
+### sjx（Session2-L187–L189）— 批量 .osz 对比
+
+我又回来了，多生成几个 .osz 我看看。注意带上原始谱面方便比较。
+
+#### Agent 回复（L190–L202）
+
+用 `batch_pack_osz.py` 批量 infer + 打包 compare `.osz`（含原谱 + 生成谱）。
+
+### sjx（Session2-L203）
+
+现在是什么情况。
+
+#### Agent 回复（L204–L206）
+
+汇报 precompute / 训练 / checkpoint / 生成物路径与进度。
+
+### sjx（Session2-L207）— 生成质量差
+
+我看了一下，生成的谱面确实是合法的，但质量很差：4 小节后才有键、没有长条、键形重复、跟音乐无关、音乐结束后还在生成……
+
+#### Agent 回复（L208–L215）
+
+分析为 **推理 bug（首窗丢 context、铺到 mp3 末）** + **模型未学到 audio conditioning**；建议分层验证。
+
+### sjx（Session2-L222）— 完整修复规格（转述）
+
+（长文）先暂停随机对比；修首段空 4 小节、尾部 silence 生成、单窗 sanity、audio ablation、position embedding ablation 等；**不是调参碰运气**。
+
+#### Agent 回复（L223–L238）
+
+按优先级修 infer：首窗 `context=0`、默认 `audio_full`、导出负时间过滤等；启动 sanity checklist。
+
+### sjx（Session2-L239）
+
+先跑一轮单窗。
+
+#### Agent 回复（L240–L244）
+
+单窗 infer + 对比输出。
+
+### sjx（Session2-L245）— 正式训练阶段
+
+我再补充解释一下：现在咱们所有音频都处理完了，已经不是试训环节了，我们现在做的是**正式训练**！你再好好检查一下有没有过时没更新的代码或配置。
+
+#### Agent 回复（L246–L255）
+
+审计脚本/配置/文档；更新 formal 默认值；清理 trial 时代残留。
+
+### sjx（Session2-L256–L270）— smoke 训练
+
+先别 preload 了，能不能用内存里的这些直接开训，训个大概 10 分钟我看看效果。现在内存里没有吗，我看内存占用 69% 啊。
+
+#### Agent 回复（L257–L285）
+
+说明 preload 占的是 **CPU 内存里的 chart bundle**，不是 GPU；`--lazy` 极慢；`--limit 256` + eager preload 约 21 step/s；启动 smoke 训练。
+
+### sjx（Session2-L294）— full-length .osz
+
+full-length 生成，打包 .osz 对比原谱，注意名字里最好带一下版本方便我找。
+
+#### Agent 回复（L295–L301）
+
+1246436 full-length infer，`Audio2Map_compare_1246436_smoke5000_tick.osz`，tag 参数。
+
+### sjx（Session2-L302–L311）— 编辑器 fail
+
+这个我在 osu 里打开谱面编辑时 fail 了。还是 fail。
+
+#### Agent 回复（L303–L320）
+
+修 export：负时间过滤、LN 格式、`y=192`、`BeatmapID=0`、去掉模板 junk 行。
+
+### sjx（Session2-L321–L333）— 负时刻键与尾部生成
+
+这次可以了，谱面质量显著提升，但是为什么会出现负时刻的键，音频 padding 有没有做好。还有模型还是在音乐结束后仍然生成键，生成谱面 1:39 原谱 1:29。你要干什么。先不用裁切。
+
+#### Agent 回复（L322–L334）
+
+解释 **bar -1 / offset 前 tick** 为 beat grid 正常语义；尾部因 **audio_full** 推理至 mp3 末；尊重「先不裁切」。
+
+### sjx（Session2-L335）— 架构说明给 ChatGPT
+
+现在把整个模型架构详细说明，我发给 ChatGPT 审阅。
+
+#### Agent 回复（L336–L341）
+
+整理架构文档；暴露当前为 **prefix-LM** 而非 enc-dec。
+
+### sjx（Session2-L342–L355）— ChatGPT 审阅结论 + 完整主规格
+
+（长文）当前实现是 prefix-LM，与约定的 **encoder-decoder + tick audio + cond 注入** 不一致，必须纠正；并附上完整 V2 主规格全文。
+
+#### Agent 回复（L343–L362）
+
+实现 `AudioChartModel`（enc_dec）；`PrefixLMAudioChartModel` 降为 ablation；写入 `V2_MASTER_SPEC.md`、合规审计；36 tests pass。
+
+### sjx（Session2-L363–L370）— 今晚不 precompute
+
+今晚先不要重写 / 全量重跑 audio feature；centered/asymmetric/fixed hop 后面小样本对比；没修改前是什么样。今晚不 precompute，代码要与磁盘 v1 grid 兼容，其他地方按最新版。
+
+#### Agent 回复（L364–L379）
+
+`AUDIO_FEATURE_SPEC_VERSION=1` 保持与 3567 张 grid 一致；enc_dec + cond_vec 顺序对齐；单谱 overfit 1246436 通过（loss→0）。
+
+### sjx（Session2-L380–L385）— overfit
+
+开一轮，顺便注意一下显存。别等了。
+
+#### Agent 回复（L381–L387）
+
+`train_debug_overfit.py` enc_dec d=256 2+2 层，~882 MiB VRAM，2000 step loss=0。
+
+### sjx（Session2-L396–L402）— 正式训练
+
+接下来要正式训练，注意使用正式训练配置，要充分利用 GPU 资源，大概训几个小时，模型参数量也得大一些，不是闹着玩了。
+
+#### Agent 回复（L397–L409）
+
+更新 `train_v2.py`：d=512、enc 4 / dec 6、heads 8、bs 32、60k steps、8/12/16 bar、bf16；后台启动 preload+训练；用户去睡觉。
+
+### sjx（Session2-L410）
+
+没问题的话我睡觉了。
+
+#### Agent 回复（L411–L413）
+
+确认训练进程在跑，preload 阶段 GPU 空闲正常，预计 preload ~1h + 训练 ~3–4h。
+
+### sjx（Session2-L414）— OVERVIEW 入库
+
+这个是基础，放在仓库里吧。（附上完整 **osu!mania 4K 谱面生成方案概要** 全文。）
+
+#### Agent 回复（L415–L420）
+
+写入 `docs/OVERVIEW.md`；更新文档索引交叉引用。
+
+### sjx（Session2-L421）
+
+额，上面这个文件是我现在唯一确认基本正确的，其他的任何内容我都不能保证，因为我原以为你可以按我说的做，但事实不是这样。
+
+#### Agent 回复（L422–L425）
+
+**文档信任层级调整：** 仅 `OVERVIEW.md` 标为 sjx 确认；`V2_MASTER_SPEC`、`v2_spec`、handoff、审计等全部标 **unverified / Agent 笔记**；冲突以 OVERVIEW 为准，不确定问 sjx。
+
+### sjx（Session2-L426–L434）— OVERVIEW 实现注记
+
+因为之前你做的跟我说的完全不同，我现在想要对全部代码进行一个全面了解，请你在 OVERVIEW.md 里做细批注，附上对应部分你实现的实际情况和代码位置，方便我审阅。你要尽量保证所有代码至少在你的注记里被提及过。
+
+#### Agent 回复（L427–L443）
+
+各节末尾加 **【实现注记】**（✅/⚠️/❌ + 代码路径）；新增 **附录 A：仓库代码全量索引**（90 个 py/cfg 文件全覆盖）；脚本校验 0 遗漏。
+
+### sjx（Session2-L444）
+
+代码里 BPM/offset 通过 CanonicalTiming 进入 tick 网格与 cond_vec（canonical_bpm_norm），未作为独立张量输入模型 —— 这个是什么意思。
+
+#### Agent 回复（L445–L447）
+
+解释：模型 `forward` 只有 `audio (B,T,142)` + `cond_vec (B,23)` + `token_ids`；BPM/offset 在**进网络前**用于建 tick grid、预计算 audio grid、cond_vec 里两个 BPM 标量；**没有**单独的 `bpm`/`offset` 张量输入。
+
+### sjx（Session2-L448–L453）— tick 量化统计
+
+现在谱面 note 转 tick 的规则是什么；统计每个原始 BPM 分段（10 BPM 一段）按原本 BPM 以 1/48 拍量化的误差分布，以及在 1/1, 1/2, …, 1/24 倍数上的比例。有点太慢了。
+
+#### Agent 回复（L449–L460）
+
+**规则：** `round((time_ms-offset)/tick_ms)`，训练用 **canonical BPM** 的 `tick_ms`；tap 头 + LN 尾各一个 endpoint。  
+重写 `scripts/analyze_tick_quantization.py`：轻量解析 + 多进程 + 直方图；全量 **~5 秒**；输出 JSON + CSV。
+
+### sjx（Session2-L461）
+
+我的结果呢，每个分段里的误差分布和在各个倍数上的比例。
+
+#### Agent 回复（L462–L466）
+
+给出全局与 34 个 BPM 段表格；文件：  
+`/root/autodl-tmp/audio2map_data/processed_v2/logs/tick_quantization_stats.json`  
+`/root/autodl-tmp/audio2map_data/processed_v2/logs/tick_quantization_stats.csv`  
+（11925 谱，1825 万 endpoint；exact on grid ~55%；1/8 拍 ~93.5%）
+
+### sjx（Session2-L467）
+
+我想看看 BPM 比较极端的谱面。
+
+#### Agent 回复（L468–L470）
+
+扫描全库：原始 BPM **55 ~ 666**；列出最低档（55 BPM Akiri 等）与最高档（666 Flandre Camellia、555 Negradolna、521 tanasinn 等）；JSON：`extreme_bpm_charts.json`。
+
+### sjx（Session2-L471）
+
+现在音频的 4 组特征都是用的一样的窗口长度吗。
+
+#### Agent 回复（L472–L473）
+
+**共用：** 同一 `hop ≈ tick_ms/4`、同一帧索引、同一 tick 池化（mean）。  
+**分析窗：** mel/chroma/RMS 均 `n_fft=2048`；onset 只传 hop（默认也是 2048）。**不是** tick 居中窗；四组算法细节仍不同。
+
+### sjx（Session2-L474）
+
+现在 git commit 并 push 上去。
+
+#### Agent 回复（L475–L482）
+
+commit **`7dad34b`**（56 files，OVERVIEW + enc_dec + legacy 归档 + 量化脚本等）；**push 失败**（HTTPS 无 GitHub 凭据）；需 sjx 本机 `git push` 或 token。
+
+### sjx（Session2-L483）— 续写对话记录
+
+哦，忘说了，把咱们之间的对话再补充到对话文件里。
+
+#### Agent 回复（L484）
+
+本节 §十一 即本次续写；见附录 J。
+
+---
+
+### Session 2 续 — 最终状态快照（2026-06-01）
+
+| 项目 | 状态 |
+|------|------|
+| **权威规格** | **`docs/OVERVIEW.md`**（sjx 确认）；其余文档 unverified |
+| 正式架构 | `AudioChartModel` enc_dec（d=512, enc4/dec6 训练中）；prefix_lm 遗留 |
+| audio grid | v1 spec（3567+ valid）；今晚不重跑 precompute |
+| 正式训练 | `train_v2.py` 后台启动（60k steps）；日志 `logs/train_v1_formal.log` |
+| overfit 验收 | 1246436 enc_dec 单谱 loss=0 ✅ |
+| 量化统计 | `tick_quantization_stats.csv/json`；极端 BPM 列表 `extreme_bpm_charts.json` |
+| Git | commit `7dad34b` 本地；**未 push** |
+| 测试 | pytest 36 passed（当时） |
+
+---
+
+## 附录 J：Session 2 续 关键代码 / 文档变更
+
+| 变更 | 路径 | 说明 |
+|------|------|------|
+| sjx 确认规格 | `docs/OVERVIEW.md` | 方案概要 + 实现注记 + 附录 A 全代码索引 |
+| 文档信任标记 | `V2_MASTER_SPEC.md`, `v2_spec.md`, `AGENT_HANDOFF.md` 等 | 标 unverified |
+| enc_dec 主模型 | `audio2map/training/model.py` | `AudioChartModel` + cross-attn |
+| 正式训练 CLI | `scripts/train_v2.py` | d=512, bf16, 8/12/16 bar, 60k steps |
+| infer/export 修复 | `inference.py`, `export.py`, `infer_v2.py` | 首窗、负时间、编辑器兼容 |
+| tick 量化分析 | `scripts/analyze_tick_quantization.py` | 多进程 BPM 段统计 |
+| compare 打包 | `scripts/batch_pack_osz.py` | tag 版 .osz |
+| legacy 归档 | `audio2map/legacy/` | v1 10ms 事件 |
+| Git commit | `7dad34b` | 待 push |
+
+## 附录 K：Session 2 续 sjx 强调原则（新增）
+
+1. **只有 OVERVIEW.md 是 sjx 确认规格**；Agent 不得把自行整理的 spec 当权威。  
+2. **不确定必须先问 sjx**，不要自行改 spec 或做 breaking 决定。  
+3. **prefix-LM 不是主线**；正式方案是 tick enc + chart dec + cond 注入。  
+4. **今晚不重跑 audio precompute**；代码与磁盘 v1 grid 兼容。  
+5. **生成式任务**：token_acc 不是越高越好；评估看合法性与多样性。  
+6. **审阅代码**以 OVERVIEW 注记 + 附录 A 为索引，逐项核对实现偏差。
