@@ -1,12 +1,18 @@
-"""Tests for osu! parser and sparse event tokenisation."""
+"""Tests for osu! parser and archived sparse-event helpers."""
 
 from pathlib import Path
 
 import pytest
 
-from audio2map.osu import beatmap_to_events, event_ar_tokens, events_to_frames, parse_beatmap
-from audio2map.osu.events import EventType, notes_to_events
-from audio2map.osu.frames import CellState
+from audio2map.legacy import (
+    CellState,
+    EventType,
+    beatmap_to_events,
+    event_ar_tokens,
+    events_to_frames,
+    notes_to_events,
+)
+from audio2map.osu import parse_beatmap
 from audio2map.osu.mania import parse_hit_object, x_to_column
 from audio2map.osu.schema import ManiaNote, NoteType
 from audio2map.utils.paths import raw_dir

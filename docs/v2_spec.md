@@ -1,9 +1,10 @@
 # Audio2Map v2 规格与实现状态
 
-本文档是 **v2 管线的唯一权威参考**（不依赖对话 history）。  
-旧 10ms sparse event MVP 见 [chart_tokens.md](chart_tokens.md) 末尾说明；`processed/` 为归档，新工作在 `processed_v2/`。
+> **⚠️ 未经 sjx 确认。** Agent 笔记：数据管线、目录、实现状态；可能错误或过时。  
+> **唯一可信方案：[OVERVIEW.md](OVERVIEW.md)**。  
+> 下文若与 OVERVIEW 冲突，**以 OVERVIEW 为准**。
 
-最后更新：2026-05-31（运行态见 [AGENT_HANDOFF.md](AGENT_HANDOFF.md)）
+最后更新：2026-06-01（Agent 维护）
 
 ---
 
@@ -268,7 +269,40 @@ hold_coverage = total_hold_lane_ticks / (chart_total_ticks * 4)
 
 **实现：** `audio2map/audio/tick_features.py`, `audio2map/data/audio_grid.py`, `scripts/precompute_audio_grid.py`
 
-### 8.1 Audio 覆盖的 absolute tick range
+### 8.1 Tick grid 预计算
+
+见下文 §8.3–§8.4（absolute tick range、数组索引）。
+
+### 8.2 Model architecture (formal v2)
+
+**`AudioChartModel` (`architecture=enc_dec`)** — the only formal training target:
+
+```text
+Audio Encoder (non-causal TransformerEncoder):
+  x_enc[t] = audio_proj(grid[t])
+           + audio_abs_pos[t]
+           + pos_in_bar[t % 192]
+           + pos_in_beat[t % 48]
+           + beat_in_bar[(t % 192) // 48]
+           + cond_emb          # broadcast to every audio token
+  memory = Encoder(x_enc)      # full self-attention, no causal mask
+
+Chart Decoder (causal TransformerDecoder):
+  dec_x = token_emb + decoder_pos + cond_emb
+  logits = Decoder(dec_x, memory=cross-attention)
+```
+
+- **Encoder length** = `window_bars × 192` tick tokens (tick-level only; no bar/beat pooling)
+- **Decoder length** = chart token sequence (separate `max_decoder_len`)
+- **Condition**: `cond_emb = MLP(cond_vec)` added to **every** encoder and decoder token (not a single prefix token)
+
+**Legacy ablation** — `PrefixLMAudioChartModel` (`architecture=prefix_lm`):  
+`[cond ; audio ; chart]` causal prefix-LM. **Not** the formal v2 architecture. Old checkpoints (e.g. `train_v1_smoke`) use this.
+
+Implementation: `audio2map/training/model.py`  
+Audit: [AUDIO_TEMPORAL_AUDIT.md](AUDIO_TEMPORAL_AUDIT.md)
+
+### 8.3 Audio 覆盖的 absolute tick range
 
 音频文件开头可能在 offset 之前，grid **不能** 默认从 tick 0 起：
 
@@ -280,7 +314,7 @@ tick_max_audio = ceil((audio_duration_ms - offset_ms) / tick_ms)
 
 `tick_min_audio` 通常为 **负数**。
 
-### 8.2 数组索引与切片
+### 8.4 数组索引与切片
 
 ```python
 array_index = absolute_tick - tick_min_audio
@@ -350,11 +384,12 @@ Overlap generation：`context_bars + keep_bars + future_bars = window_bars`
 /root/audio2map/                 # 代码
 /root/autodl-tmp/audio2map_data/
 ├── raw/{sid}/                   # mp3 + *.osu
-├── processed/                   # 旧 MVP（可删）
+├── processed/                   # 旧 MVP 磁盘缓存（代码已删，可删目录）
 ├── processed_v2/                # v2 运行时产物
 │   ├── audio_grid/            # {stem}.npy + .json
-│   ├── checkpoints/           # e.g. trial_multi/, abendstern_overfit/
-│   └── logs/
+│   ├── checkpoints/           # train_v1/ (formal), trial_multi_v2/ (legacy trial)
+│   ├── logs/
+│   └── generated/             # infer 导出的 .osu / .osz
 ├── chart_meta/manifest.jsonl
 └── .collector/
 ```
@@ -376,6 +411,8 @@ Overlap generation：`context_bars + keep_bars + future_bars = window_bars`
 | overlap inference | `audio2map/training/inference.py` |
 | export .osu | `audio2map/osu/export.py` |
 | train / infer scripts | `scripts/train_v2.py`, `scripts/infer_v2.py` |
+| grid precompute / audit | `scripts/precompute_audio_grid.py`, `scripts/audit_audio_grid.py` |
+| v1 sparse events (archived) | `audio2map/legacy/` |
 | 5-state ROW + vocab | `audio2map/osu/row_tokens.py` |
 | Round-trip | `audio2map/osu/round_trip.py` |
 | BPM canon | `audio2map/osu/bpm.py` |
@@ -401,7 +438,8 @@ Overlap generation：`context_bars + keep_bars + future_bars = window_bars`
 10. ✅ constrained decoding + overlap inference — `audio2map/training/decode.py`, `inference.py`  
 11. ✅ export `.osu` — `audio2map/osu/export.py`, `scripts/infer_v2.py`  
 12. ✅ eval metrics — `audio2map/eval/`, `scripts/eval_v2.py`  
-13. 🟡 multi-chart trial train done (1109 charts, 3k steps); precompute **67%** then **disk full** — see [AGENT_HANDOFF.md](AGENT_HANDOFF.md)  
+13. ✅ formal multi-chart training defaults (`train_v2.py` → `train_v1/`, tick audio, 11,927 charts)  
+14. 🟡 **formal run `train_v1/` in progress or pending** — see [AGENT_HANDOFF.md](AGENT_HANDOFF.md)  
 
 ---
 

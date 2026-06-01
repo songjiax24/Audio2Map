@@ -56,6 +56,42 @@ def grid_cache_paths(out_dir: Path, stem: str) -> tuple[Path, Path]:
     return out_dir / f"{stem}.npy", out_dir / f"{stem}.json"
 
 
+def expected_grid_shape(meta: AudioGridMeta | dict) -> tuple[int, int]:
+    if isinstance(meta, AudioGridMeta):
+        tick_min, tick_max, feature_dim = meta.tick_min, meta.tick_max, meta.feature_dim
+    else:
+        tick_min, tick_max, feature_dim = meta["tick_min"], meta["tick_max"], meta["feature_dim"]
+    return tick_max - tick_min, feature_dim
+
+
+def is_valid_audio_grid_cache(npy_path: Path, json_path: Path) -> bool:
+    """Return True only when both artifacts exist and ``npy`` matches ``json`` meta."""
+    if not npy_path.is_file() or not json_path.is_file():
+        return False
+    try:
+        meta = AudioGridMeta.from_dict(json.loads(json_path.read_text(encoding="utf-8")))
+        features = np.load(npy_path)
+    except Exception:
+        return False
+    return features.shape == expected_grid_shape(meta) and features.dtype == np.float32
+
+
+def remove_audio_grid_cache(npy_path: Path, json_path: Path) -> None:
+    """Delete one grid cache pair (missing paths are ignored)."""
+    npy_path.unlink(missing_ok=True)
+    json_path.unlink(missing_ok=True)
+
+
+def cleanup_stale_grid_parts(out_dir: Path) -> int:
+    """Remove leftover atomic-write temp files under ``out_dir``."""
+    removed = 0
+    for pattern in ("*.npy.part", "*.json.part", "*.part"):
+        for path in out_dir.glob(pattern):
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def compute_audio_grid(
     audio_path: Path,
     timing: CanonicalTiming,
@@ -105,13 +141,29 @@ def save_audio_grid(
         offset_ms=meta.offset_ms,
     )
     npy_path, json_path = grid_cache_paths(out_dir, stem)
-    np.save(npy_path, features.astype(np.float32))
-    json_path.write_text(json.dumps(meta.to_dict(), indent=2), encoding="utf-8")
+    tmp_npy = npy_path.with_name(f"{npy_path.stem}.npy.part")
+    tmp_json = json_path.with_name(f"{json_path.stem}.json.part")
+    payload = features.astype(np.float32)
+    try:
+        with tmp_npy.open("wb") as fh:
+            np.save(fh, payload, allow_pickle=False)
+        tmp_json.write_text(json.dumps(meta.to_dict(), indent=2), encoding="utf-8")
+        tmp_json.replace(json_path)
+        tmp_npy.replace(npy_path)
+    except Exception:
+        tmp_npy.unlink(missing_ok=True)
+        tmp_json.unlink(missing_ok=True)
+        raise
+    if not is_valid_audio_grid_cache(npy_path, json_path):
+        remove_audio_grid_cache(npy_path, json_path)
+        raise RuntimeError(f"audio grid cache failed post-save validation: {npy_path.stem}")
     return npy_path, json_path
 
 
 def load_audio_grid(out_dir: Path, stem: str) -> tuple[np.ndarray, AudioGridMeta]:
     npy_path, json_path = grid_cache_paths(out_dir, stem)
+    if not is_valid_audio_grid_cache(npy_path, json_path):
+        raise FileNotFoundError(f"audio grid cache missing or invalid: {stem}")
     features = np.load(npy_path)
     meta = AudioGridMeta.from_dict(json.loads(json_path.read_text(encoding="utf-8")))
     return features, meta
@@ -136,9 +188,10 @@ def precompute_chart_audio_grid(
     audio_path = find_audio_file(set_dir)
     stem = resolve_grid_stem(audio_path, timing)
     npy_path, json_path = grid_cache_paths(out_dir, stem)
-    if skip_existing and npy_path.is_file() and json_path.is_file():
+    if skip_existing and is_valid_audio_grid_cache(npy_path, json_path):
         return npy_path, json_path
 
+    remove_audio_grid_cache(npy_path, json_path)
     features, meta = compute_audio_grid(audio_path, timing)
     return save_audio_grid(features, meta, out_dir)
 

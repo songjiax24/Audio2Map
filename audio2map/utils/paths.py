@@ -23,7 +23,7 @@ def collector_dir() -> Path:
 
 
 def processed_dir() -> Path:
-    """Preprocessed training samples (mel + events + metadata)."""
+    """Archived v1 mel+events cache on the data disk (safe to delete)."""
     return get_data_root() / "processed"
 
 
@@ -37,10 +37,11 @@ def audio_grid_dir() -> Path:
     return processed_v2_dir() / "audio_grid"
 
 
-def v2_charts_dir() -> Path:
-    return processed_v2_dir() / "charts"
-
-
 def chart_meta_dir() -> Path:
     """Per-chart difficulty metadata (SR, MSD, hold ratio)."""
     return get_data_root() / "chart_meta"
+
+
+def default_train_checkpoint_dir() -> Path:
+    """Default output for ``scripts/train_v2.py`` formal multi-chart runs."""
+    return processed_v2_dir() / "checkpoints" / "train_v1"

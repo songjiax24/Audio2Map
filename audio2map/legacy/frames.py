@@ -7,7 +7,7 @@ from enum import IntEnum
 
 import numpy as np
 
-from audio2map.osu.events import ChartEvent, DEFAULT_HOP_MS, EventType, ms_to_frame
+from audio2map.legacy.events import ChartEvent, DEFAULT_HOP_MS, EventType, ms_to_frame
 from audio2map.osu.schema import Beatmap, ManiaNote, NoteType
 
 __all__ = [
@@ -93,7 +93,7 @@ def notes_to_frames(
     duration_ms: int | None = None,
     hop_ms: int = DEFAULT_HOP_MS,
 ) -> FrameChart:
-    from audio2map.osu.events import notes_to_events
+    from audio2map.legacy.events import notes_to_events
 
     events = notes_to_events(notes, hop_ms=hop_ms)
     dur = duration_ms if duration_ms is not None else duration_ms_from_notes(notes)
@@ -107,7 +107,7 @@ def beatmap_to_frames(
     padding_ms: int = 500,
 ) -> FrameChart:
     dur = max(beatmap.duration_ms, duration_ms_from_notes(beatmap.notes, padding_ms=padding_ms))
-    from audio2map.osu.events import beatmap_to_events
+    from audio2map.legacy.events import beatmap_to_events
 
     return events_to_frames(beatmap_to_events(beatmap, hop_ms=hop_ms), duration_ms=dur, hop_ms=hop_ms)
 

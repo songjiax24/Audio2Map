@@ -10,6 +10,8 @@ import numpy as np
 
 from audio2map.data.audio_grid import (
     AudioGridMeta,
+    grid_cache_paths,
+    is_valid_audio_grid_cache,
     load_audio_grid,
     precompute_chart_audio_grid,
     resolve_grid_stem,
@@ -63,11 +65,11 @@ def _load_or_build_grid(
 
     audio_path = find_audio_file(set_dir)
     stem = resolve_grid_stem(audio_path, timing)
-    npy = grid_dir / f"{stem}.npy"
-    if npy.is_file():
+    npy, json_path = grid_cache_paths(grid_dir, stem)
+    if is_valid_audio_grid_cache(npy, json_path):
         return load_audio_grid(grid_dir, stem)
     if not build_if_missing:
-        raise FileNotFoundError(f"audio grid missing: {npy}")
+        raise FileNotFoundError(f"audio grid cache missing or invalid: {stem}")
     precompute_chart_audio_grid(set_dir, timing, grid_dir, skip_existing=False)
     return load_audio_grid(grid_dir, stem)
 

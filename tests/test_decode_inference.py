@@ -56,4 +56,8 @@ def test_overlap_windows_cover_range() -> None:
     cfg = OverlapConfig(window_bars=8, context_bars=4, keep_bars=4, future_bars=0)
     wins = overlap_inference_bar_windows(-2, 20, cfg)
     assert wins[0][0] <= -2
+    assert wins[0][2] == wins[0][0], "first window must keep from win_start (context=0)"
+    assert wins[0][4] == 0
     assert wins[-1][2] < wins[-1][3]
+    if len(wins) > 1:
+        assert wins[1][4] == cfg.context_bars

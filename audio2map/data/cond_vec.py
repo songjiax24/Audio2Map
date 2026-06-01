@@ -1,4 +1,4 @@
-"""23-dim condition vector for v2 training (see docs/v2_spec.md §7)."""
+"""23-dim condition vector for v2 training (V2_MASTER_SPEC.md §14.1)."""
 
 from __future__ import annotations
 
@@ -8,36 +8,36 @@ from audio2map.difficulty.chart_meta import ChartMeta
 
 COND_VEC_DIM = 23
 
-# Index map for debugging / logging.
+# Fixed index map — do not reorder without spec update.
 COND_VEC_NAMES: tuple[str, ...] = (
     "osu_sr_norm",
-    "hold_ratio_norm",
-    "hold_coverage_norm",
+    "hold_ratio",
+    "hold_coverage",
     "analyzer_ln_percent",
     "analyzer_hb_row_ratio",
-    "analyzer_stream",
-    "analyzer_chordstream",
-    "analyzer_jacks",
-    "analyzer_coordination",
-    "analyzer_density",
-    "analyzer_wildcard",
-    "analyzer_available",
-    "msd_overall_norm",
-    "msd_stream_norm",
-    "msd_jumpstream_norm",
-    "msd_handstream_norm",
-    "msd_stamina_norm",
-    "msd_jack_speed_norm",
-    "msd_chordjack_norm",
-    "msd_technical_norm",
-    "msd_available",
+    "analyzer_stream_ratio",
+    "analyzer_chordstream_ratio",
+    "analyzer_jacks_ratio",
+    "analyzer_coordination_ratio",
+    "analyzer_density_ratio",
+    "analyzer_wildcard_ratio",
+    "etterna_overall_norm",
+    "etterna_stream_norm",
+    "etterna_jumpstream_norm",
+    "etterna_handstream_norm",
+    "etterna_stamina_norm",
+    "etterna_jack_norm",
+    "etterna_chordjack_norm",
+    "etterna_technical_norm",
     "canonical_bpm_norm",
     "bpm_scale_exp_norm",
+    "analyzer_available",
+    "msd_available",
 )
 
 
 def build_cond_vec(meta: ChartMeta) -> np.ndarray:
-    """Map ``ChartMeta`` to a normalized ``(23,)`` float32 vector."""
+    """Map ``ChartMeta`` to normalized ``(23,)`` float32 vector."""
     v = np.zeros(COND_VEC_DIM, dtype=np.float32)
 
     if meta.official_sr is not None:
@@ -55,7 +55,7 @@ def build_cond_vec(meta: ChartMeta) -> np.ndarray:
         v[8] = float(meta.analyzer_coordination or 0.0)
         v[9] = float(meta.analyzer_density or 0.0)
         v[10] = float(meta.analyzer_wildcard or 0.0)
-    v[11] = float(meta.analyzer_available)
+    v[21] = float(meta.analyzer_available)
 
     if meta.msd_available:
         msd_vals = (
@@ -70,12 +70,12 @@ def build_cond_vec(meta: ChartMeta) -> np.ndarray:
         )
         for i, val in enumerate(msd_vals):
             if val is not None:
-                v[12 + i] = float(np.clip(val / 40.0, 0.0, 1.5))
-    v[20] = float(meta.msd_available)
+                v[11 + i] = float(np.clip(val / 40.0, 0.0, 1.5))
+    v[22] = float(meta.msd_available)
 
     if meta.canonical_bpm is not None:
-        v[21] = float((meta.canonical_bpm - 120.0) / 120.0)
+        v[19] = float((meta.canonical_bpm - 120.0) / 120.0)
     if meta.bpm_scale_exp is not None:
-        v[22] = float(meta.bpm_scale_exp / 4.0)
+        v[20] = float(meta.bpm_scale_exp / 4.0)
 
     return v

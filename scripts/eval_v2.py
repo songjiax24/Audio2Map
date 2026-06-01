@@ -55,11 +55,11 @@ def main() -> None:
 
         from audio2map.data.cond_vec import build_cond_vec
         from audio2map.difficulty.chart_meta import compute_chart_meta
-        from audio2map.training.model import AudioChartModel
+        from audio2map.training.model import load_checkpoint
 
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         path = Path(args.osu)
-        model = AudioChartModel.load_checkpoint(Path(args.checkpoint), device)
+        model = load_checkpoint(Path(args.checkpoint), device)
         cond = build_cond_vec(compute_chart_meta(path, skip_msd=True))
         stats = eval_inference_chart(
             model,
@@ -95,10 +95,10 @@ def main() -> None:
             raise SystemExit("generate mode requires --checkpoint, --osu, --start-bar")
         import torch
 
-        from audio2map.training.model import AudioChartModel
+        from audio2map.training.model import load_checkpoint
 
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-        model = AudioChartModel.load_checkpoint(Path(args.checkpoint), device)
+        model = load_checkpoint(Path(args.checkpoint), device)
         agg, notes = eval_generate_window(
             model,
             Path(args.osu),
@@ -123,10 +123,10 @@ def main() -> None:
             raise SystemExit("teacher mode requires --checkpoint")
         import torch
 
-        from audio2map.training.model import AudioChartModel
+        from audio2map.training.model import load_checkpoint
 
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-        model = AudioChartModel.load_checkpoint(Path(args.checkpoint), device)
+        model = load_checkpoint(Path(args.checkpoint), device)
         agg = eval_teacher_forcing(
             model,
             paths,

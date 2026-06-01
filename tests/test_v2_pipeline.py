@@ -7,7 +7,12 @@ import random
 import numpy as np
 
 from audio2map.audio.tick_features import V2_FEATURE_DIM, compute_tick_grid_features
-from audio2map.data.audio_grid import AudioGridMeta, slice_audio_window
+from audio2map.data.audio_grid import (
+    AudioGridMeta,
+    is_valid_audio_grid_cache,
+    save_audio_grid,
+    slice_audio_window,
+)
 from audio2map.data.cond_vec import COND_VEC_DIM, build_cond_vec
 from audio2map.data.window_sampler import (
     WindowSamplingConfig,
@@ -58,9 +63,11 @@ def test_build_cond_vec_dim_and_flags() -> None:
     v = build_cond_vec(meta)
     assert v.shape == (COND_VEC_DIM,)
     assert v[0] == 0.35  # 3.5/10
-    assert v[11] == 1.0
-    assert v[20] == 1.0
-    assert v[21] == 0.5  # (180-120)/120
+    assert v[11] == 0.5  # msd_overall 20/40
+    assert v[21] == 1.0  # analyzer_available
+    assert v[22] == 1.0  # msd_available
+    assert v[19] == 0.5  # (180-120)/120
+    assert v[20] == 0.0  # bpm_scale_exp
 
 
 def test_build_loss_mask() -> None:
@@ -146,3 +153,54 @@ def test_tick_features_shape() -> None:
         tick_max=10,
     )
     assert feats.shape == (15, V2_FEATURE_DIM)
+
+
+def test_is_valid_audio_grid_cache(tmp_path) -> None:
+    meta = AudioGridMeta(
+        tick_min=-5,
+        tick_max=10,
+        offset_ms=100.0,
+        canonical_bpm=180.0,
+        ticks_per_beat=48,
+        feature_dim=V2_FEATURE_DIM,
+        sample_rate=22050,
+        audio_hash="abc123",
+        audio_path="/tmp/x.mp3",
+        duration_ms=5000,
+    )
+    features = np.zeros((meta.num_ticks, V2_FEATURE_DIM), dtype=np.float32)
+    npy, json_path = save_audio_grid(features, meta, tmp_path)
+    assert is_valid_audio_grid_cache(npy, json_path)
+
+    npy.write_bytes(b"partial")
+    assert not is_valid_audio_grid_cache(npy, json_path)
+
+    json_path.unlink()
+    assert not is_valid_audio_grid_cache(npy, json_path)
+
+
+def test_load_audio_grid_rejects_invalid(tmp_path) -> None:
+    from audio2map.data.audio_grid import grid_cache_paths, load_audio_grid
+
+    meta = AudioGridMeta(
+        tick_min=0,
+        tick_max=5,
+        offset_ms=0.0,
+        canonical_bpm=180.0,
+        ticks_per_beat=48,
+        feature_dim=V2_FEATURE_DIM,
+        sample_rate=22050,
+        audio_hash="deadbeef",
+        audio_path="/tmp/x.mp3",
+        duration_ms=1000,
+    )
+    features = np.zeros((meta.num_ticks, V2_FEATURE_DIM), dtype=np.float32)
+    save_audio_grid(features, meta, tmp_path)
+    stem = "deadbeef_bpm180.000_offset0.0"
+    npy, _ = grid_cache_paths(tmp_path, stem)
+    npy.write_bytes(b"truncated")
+    try:
+        load_audio_grid(tmp_path, stem)
+        raise AssertionError("expected FileNotFoundError")
+    except FileNotFoundError:
+        pass

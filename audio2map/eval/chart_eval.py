@@ -23,6 +23,7 @@ class AggregateStats:
     note: NoteMatchStats = field(default_factory=NoteMatchStats)
     token_correct: int = 0
     token_total: int = 0
+    split_token: object | None = None
 
     def merge_note(self, s: NoteMatchStats) -> None:
         self.note.tp += s.tp
@@ -40,12 +41,15 @@ class AggregateStats:
             self.note.ms_deltas.extend(s.ms_deltas)
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "charts": self.charts,
             "roundtrip_rate": self.roundtrip_ok / self.charts if self.charts else 0.0,
             "notes": self.note.to_dict(),
             "token_acc": self.token_correct / self.token_total if self.token_total else 0.0,
         }
+        if self.split_token is not None:
+            out["split_token_acc"] = self.split_token.to_dict()
+        return out
 
 
 def eval_roundtrip(paths: list[Path]) -> AggregateStats:
@@ -175,8 +179,10 @@ def eval_teacher_forcing(
 
     from audio2map.data.v2_dataset import build_training_sample
     from audio2map.data.window_sampler import WindowSamplingConfig
+    from audio2map.eval.token_accuracy import SplitTokenAccuracy, accumulate_split_accuracy
 
     agg = AggregateStats()
+    agg.split_token = SplitTokenAccuracy()
     rng = random.Random(seed)
     id_to_tok = invert_vocab()
     model.eval()
@@ -207,6 +213,7 @@ def eval_teacher_forcing(
             total = mask.sum().item()
             agg.token_correct += int(correct)
             agg.token_total += int(total)
+            agg.split_token.merge(accumulate_split_accuracy(pred[0], targets[0], mask[0]))
 
             timing = CanonicalTiming.from_beatmap(parse_beatmap(path))
             rebuilt_ids = token_ids[0].clone()

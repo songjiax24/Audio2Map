@@ -19,6 +19,7 @@ def pad_batch(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     attn_mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
     cond_vec = torch.stack([item["cond_vec"] for item in batch], dim=0)
     audio = torch.zeros(len(batch), max_audio, feat_dim, dtype=torch.float32)
+    audio_mask = torch.zeros(len(batch), max_audio, dtype=torch.bool)
 
     for i, item in enumerate(batch):
         n = item["token_ids"].shape[0]
@@ -27,6 +28,7 @@ def pad_batch(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         attn_mask[i, :n] = True
         a = item["audio"].shape[0]
         audio[i, :a] = item["audio"]
+        audio_mask[i, :a] = True
 
     return {
         "token_ids": token_ids,
@@ -34,4 +36,5 @@ def pad_batch(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         "attn_mask": attn_mask,
         "cond_vec": cond_vec,
         "audio": audio,
+        "audio_mask": audio_mask,
     }

@@ -1,4 +1,14 @@
-"""Per-tick audio features aligned to the canonical BPM grid (v2)."""
+"""Per-tick audio features aligned to the canonical BPM grid (v2).
+
+**Active spec (v1):** matches ``processed_v2/audio_grid/`` precompute (3567 grids).
+
+- Dynamic hop ≈ ``tick_ms / 4``
+- Frame → tick via ``floor((frame_ms - offset) / tick_ms)``
+- All channels pooled with **mean** (including onset)
+
+**Deferred (v2):** hop=512, tick-centered window, onset=max — see V2_MASTER_SPEC.md §7.
+Do not switch until small-sample comparison + selective precompute.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +20,9 @@ V2_SAMPLE_RATE = 22_050
 V2_N_MELS = 128
 V2_N_CHROMA = 12
 V2_FEATURE_DIM = V2_N_MELS + 1 + 1 + V2_N_CHROMA  # mel + onset + rms + chroma
+
+# Grids on disk were built with v1; bump only after re-precompute with v2 pipeline.
+AUDIO_FEATURE_SPEC_VERSION = 1
 
 
 def _frame_hop_ms(tick_ms: float) -> float:
@@ -26,7 +39,7 @@ def compute_tick_grid_features(
     tick_min: int,
     tick_max: int,
 ) -> np.ndarray:
-    """Return ``(tick_max - tick_min, V2_FEATURE_DIM)`` float32 features."""
+    """Return ``(tick_max - tick_min, V2_FEATURE_DIM)`` float32 features (spec v1)."""
     import librosa
 
     if tick_max <= tick_min:

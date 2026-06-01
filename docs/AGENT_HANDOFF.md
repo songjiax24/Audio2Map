@@ -1,29 +1,37 @@
 # Agent handoff — Audio2Map v2
 
-**Read this first** when resuming work on a fresh or cloned instance.  
-Authoritative model/data spec: [v2_spec.md](v2_spec.md).
+> **⚠️ 本页为 Agent 工作笔记，未经 sjx 确认，可能过时。**  
+> **唯一可信规格：[OVERVIEW.md](OVERVIEW.md)**。不确定先问 sjx。
 
-Last updated: **2026-05-31**
+| 文档 | 状态 | 用途 |
+|------|------|------|
+| **[OVERVIEW.md](OVERVIEW.md)** | **sjx 确认** | 方案概要（唯一可信） |
+| [V2_MASTER_SPEC.md](V2_MASTER_SPEC.md) | unverified | Agent 整理的“主规格” |
+| [V2_COMPLIANCE_AUDIT.md](V2_COMPLIANCE_AUDIT.md) | unverified | 代码 vs Agent 文档对照 |
+| [v2_spec.md](v2_spec.md) | unverified | 数据管线、代码索引 |
+| [../README.md](../README.md) | unverified | 命令速查 |
+
+**规则：不确定处先问 sjx；Agent 不得自行改 OVERVIEW 或做 breaking 决定。**
+
+Last updated: **2026-06-01**
 
 ---
 
-## 0. Migration note (5090 instance)
+## 0. Quick start (5090)
 
-**Do not clone the old system disk.** Only attach/mount the **data disk**:
+```bash
+export AUDIO2MAP_DATA_ROOT=/root/autodl-tmp/audio2map_data
+cd /root/audio2map && source .venv/bin/activate
 
-```text
-/root/autodl-tmp/audio2map_data/   # raw, processed_v2, chart_meta, …
+python scripts/audit_audio_grid.py      # expect valid=3567, invalid=0
+pytest tests/test_v2_pipeline.py -q
+
+# Formal training (defaults: 11927 charts, enc_dec, 50k steps → train_v1/)
+# ⚠️ Do NOT run until V2_COMPLIANCE_AUDIT.md §27 gates pass
+python scripts/train_v2.py --architecture enc_dec
 ```
 
-On the new machine:
-
-1. `git clone` / `git pull` this repo to `/root/audio2map` (or any path)
-2. Recreate Python env (conda **or** uv — see §3)
-3. `export AUDIO2MAP_DATA_ROOT=/root/autodl-tmp/audio2map_data`
-4. Install **PyTorch with CUDA build matching the 5090 driver** (see §3.2)
-5. Read §4 for checkpoint / precompute state on the data disk
-
-Checkpoints and `audio_grid/` caches are **on the data disk**, not in git.
+**Do not clone the old system disk** — only mount the data disk and `git clone` this repo.
 
 ---
 
@@ -33,233 +41,126 @@ Checkpoints and `audio_grid/` caches are **on the data disk**, not in git.
 P(chart | audio, BPM, offset, condition_vector)
 ```
 
-- osu!mania **4K**, Phase 1: **constant BPM**, **meter=4**
-- `offset_ms` = beat-grid origin (`absolute_tick=0` at `offset_ms`); ticks **may be negative**; **no cropping**
-- Training: continuous-window AR; cond_vec is **not** tokenized (prefix conditioning)
+- osu!mania **4K**, Phase 1: constant BPM, meter=4
+- `offset_ms` = beat-grid origin; **negative ticks allowed**, no cropping
+- **Generative** task: one training chart is one sample, not the unique answer
+- `token_acc` in logs = teacher-forcing diagnostic only (not “higher is better” for final chart quality)
 
 ---
 
-## 2. Paths (default AutoDL layout)
+## 2. Paths
 
 | What | Path |
 |------|------|
-| Code repo | `/root/audio2map` |
+| Code | `/root/audio2map` |
 | Data root | `/root/autodl-tmp/audio2map_data` |
-| Raw sets | `$DATA/raw/{set_id}/` — audio + `*.osu` |
-| v2 artifacts | `$DATA/processed_v2/` |
+| Raw sets | `$DATA/raw/{set_id}/` |
 | Audio grids | `$DATA/processed_v2/audio_grid/{stem}.npy` + `.json` |
-| Checkpoints | `$DATA/processed_v2/checkpoints/` |
+| Checkpoints (formal) | `$DATA/processed_v2/checkpoints/train_v1/` |
+| Checkpoints (legacy trial) | `$DATA/processed_v2/checkpoints/trial_multi_v2/` |
 | Logs | `$DATA/processed_v2/logs/` |
+| Generated exports | `$DATA/processed_v2/generated/` |
 | Chart meta | `$DATA/chart_meta/manifest.jsonl` |
 
-```bash
-export AUDIO2MAP_DATA_ROOT=/root/autodl-tmp/audio2map_data
-conda activate audio2map
-cd /root/audio2map
-```
+Override: `export AUDIO2MAP_DATA_ROOT=...`
 
-Override data root via `AUDIO2MAP_DATA_ROOT` (see `audio2map/utils/paths.py`).
+**Safe to delete on disk:** `$DATA/processed/` (~10G) — deprecated v1 mel cache.
 
 ---
 
 ## 3. Environment
 
-### 3.1 Recommended: `uv` (new instances)
-
-**Yes — uv is a good fit** for this repo on a fresh 5090 box:
-
-- Fast, reproducible venv from `pyproject.toml`
-- No need to clone the old conda env
-- Keep **ffmpeg** as a system/apt package (librosa decode)
-
-```bash
-# system (AutoDL / Ubuntu)
-apt-get update && apt-get install -y ffmpeg libsndfile1   # if missing
-
-curl -LsSf https://astral.sh/uv/install.sh | sh
-cd /root/audio2map
-
-uv venv --python 3.11 .venv
-source .venv/bin/activate
-uv pip install -e ".[dev,train]"
-
-# PyTorch: pick the wheel for YOUR driver / GPU (5090 = very new CUDA arch)
-# Check https://pytorch.org/get-started/locally/ — often cu124/cu128 or nightly.
-# Example (adjust index URL to match PyTorch site):
-# uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-
-python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-pytest tests/test_row_tokens_v2.py tests/test_v2_pipeline.py -q
-```
-
-If `torch.cuda.is_available()` is false or you get SM/arch errors, reinstall torch from a **newer** CUDA wheel — do not assume the old 4090 env transfers.
-
-### 3.2 Alternative: conda (legacy)
-
-```bash
-conda env create -f environment.yml
-conda activate audio2map
-# Still reinstall torch on 5090 if CUDA mismatch:
-# pip install torch --index-url https://download.pytorch.org/whl/cu128
-```
-
-### 3.3 Runtime
-
-```bash
-export AUDIO2MAP_DATA_ROOT=/root/autodl-tmp/audio2map_data
-```
-
-- GPU training tested on RTX **4090** (old instance); **5090 needs fresh torch**
-- `precompute_audio_grid.py` is **CPU-heavy** (librosa); low GPU util during preload is normal
+PyTorch **2.12+cu130**, RTX 5090, uv venv 3.11. See [README.md](../README.md) for setup.
 
 ---
 
-## 4. Session state (2026-05-31)
+## 4. Current state (2026-06-01)
 
-### Done / verified
+### Data / precompute — **COMPLETE**
 
-| Item | Result |
+| Item | Status |
 |------|--------|
-| v2 tokenization + negative tick round-trip | 500-chart sample **100%** |
-| Abendstern single-window overfit | token_acc **1.0** (`checkpoints/abendstern_overfit/final.pt`) |
-| Teacher eval (same window) | token_acc 1.0, note F1 1.0 |
-| Generate AR (overfit ckpt, fixed `next_token_logits`) | note F1 1.0 (single window only) |
-| Multi-chart trial train | **3000 steps**, 1109 charts, see below |
-| Eval pipeline | `scripts/eval_v2.py` — roundtrip / teacher / generate / window |
+| Eligible charts | **11,927** |
+| Valid audio grids | **3,567** (audit: **0 invalid**) |
+| Trainable (`--require-grid` default) | **11,927 / 11,927** (100%) |
+| Hold-out (no grid) | **0** |
 
-### Multi-chart trial (`trial_multi`)
+Precompute 已跑完；正式训练不再依赖续跑 precompute。
 
-- **Completed** 3000 steps (~19 step/s after preload)
-- **1109** charts with precomputed `audio_grid` → **2218** samples/epoch
-- Checkpoints: `processed_v2/checkpoints/trial_multi/step_{500,2000,2500,3000}.pt`
-- Final log metrics: loss ≈ 3.86, token_acc ≈ **31%** (not converged; peak acc ~50% mid-run)
-- Log: `processed_v2/logs/trial_multi_train.log`
+### Model / training architecture (formal)
 
-### Precompute (`audio_grid`)
+| Item | Formal default | Legacy trial |
+|------|----------------|--------------|
+| `audio_pooling` | **`tick`** (1536 ticks/window) | `bar` (8 vectors/window) |
+| Charts | **11,927** | 1,109–6,159 (partial grids) |
+| Checkpoint dir | **`train_v1/`** | `trial_multi_v2/` |
+| Steps default | **50,000** | 3,000–20,000 |
 
-- Total unique jobs: **3564** sets (dedupe by `audio_hash + canonical_bpm + offset_ms`)
-- Progress when stopped: **~2402/3564 (67%)**
-- **Stopped intentionally** — data disk **50G/50G full** (`Errno 28 No space left on device`)
-- Log: `processed_v2/logs/precompute_audio_grid.log` (~684 disk-full warnings at tail)
-- **Do not restart precompute** on 50G disk without expanding storage or freeing space
+**Legacy `trial_multi_v2/step_20000.pt`:** bar-pool 模型，6159 张谱时代产物；**不能**作为正式训练目标，仅作历史对照。
 
-**Disk budget rule of thumb:** each grid ≈ **15–25 MB** (full song, 142-dim float32 per tick).  
-3564 sets ≈ **45–70 GB** for grids alone, plus `raw/` audio. Plan **≥80–100 GB** data disk for full precompute.
+### Code fixes already in tree (2026-06-01)
 
-### Known bugs fixed in code (must stay)
+- First overlap window: `context_bars=0`（不丢首 4 小节）
+- Inference: 默认 `audio_full` range + tail 分析指标；eval 可用 `reference_chart`
+- Decode: 默认采样 `T=0.8, top_p=0.95`（`--greedy` 仅 debug）
+- Degeneracy metrics + split token accuracy
 
-1. **`AudioChartModel.next_token_logits()`** — generation must append PAD before `forward()`; do not use `forward()` alone for single-step decode.
-2. **`max_seq_len=1024`** in `model.py` — 8-bar windows can reach **~559 tokens**; old limit 512 caused CUDA index error in multi-chart training.
-3. **`filter_paths_with_grid()`** in `chart_bundle.py` — used by `train_v2.py --require-grid` to skip charts without cache (faster startup).
-4. **`ChartBundle` preload** — `scripts/train_debug_overfit.py` preloads one batch; avoid recomputing SR/grid every step.
-
----
-
-## 5. Commands cheat sheet
+### Next: formal training run
 
 ```bash
-# Precompute (CPU, long; needs disk space)
-python scripts/precompute_audio_grid.py
-python scripts/precompute_audio_grid.py --limit 100   # smoke
-
-# Train
-python scripts/train_v2.py --require-grid --steps 3000 --batch-size 8 \
-  --samples-per-chart 2 --out processed_v2/checkpoints/trial_multi
-
-# Single-chart overfit debug
-python scripts/train_debug_overfit.py \
-  --osu "/root/autodl-tmp/audio2map_data/raw/2127527/seatrus - Abendstern (Maiiy) [Insane].osu" \
-  --start-bar -1 --steps 1200
-
-# Eval
-python scripts/eval_v2.py --mode teacher --checkpoint .../final.pt \
-  --osu "..." --start-bar -1
-python scripts/eval_v2.py --mode generate --checkpoint ... --osu "..." --start-bar -1
-
-# Tests
-pytest tests/test_row_tokens_v2.py tests/test_v2_pipeline.py tests/test_eval.py tests/test_decode_inference.py -q
+python scripts/train_v2.py \
+  --out "$AUDIO2MAP_DATA_ROOT/processed_v2/checkpoints/train_v1" \
+  2>&1 | tee "$AUDIO2MAP_DATA_ROOT/processed_v2/logs/train_v1.log"
 ```
 
-Config YAML (reference only; scripts use CLI): `configs/data/v2.yaml`, `configs/train/trial_multi.yaml`.
+Preload ~11k charts 需 **~1–2 小时**；之后 ~25 step/s。无 `--resume`，长跑请自行规划 save_every。
 
 ---
 
-## 6. Key modules
-
-| Concern | Module |
-|---------|--------|
-| Spec / tokens | `audio2map/osu/row_tokens.py`, `docs/v2_spec.md` |
-| cond_vec (23-d) | `audio2map/data/cond_vec.py` |
-| Tick audio features | `audio2map/audio/tick_features.py` (22.05 kHz, 142-d/tick) |
-| Grid cache | `audio2map/data/audio_grid.py` |
-| Window sampling | `audio2map/data/window_sampler.py` |
-| Training sample | `audio2map/data/v2_dataset.py` |
-| Fast preload | `audio2map/data/chart_bundle.py` |
-| Model | `audio2map/training/model.py` — `AudioChartModel` |
-| Dataset / collate | `audio2map/training/dataset.py`, `collate.py` |
-| Constrained decode | `audio2map/training/decode.py` |
-| Overlap inference | `audio2map/training/inference.py` |
-| Export .osu | `audio2map/osu/export.py` |
-| Eval | `audio2map/eval/chart_eval.py`, `note_match.py` |
-
-Vocab size: **821** = 4 specials + 192 POS + 625 ROW.
-
----
-
-## 7. Benchmark charts
-
-| set_id | Use |
-|--------|-----|
-| **2127527** | Abendstern Insane — pre-offset events, overfit/eval baseline |
-| 2545208, 2306091 | Additional pre-offset round-trip tests |
-
-Example path:
-
-```text
-/root/autodl-tmp/audio2map_data/raw/2127527/seatrus - Abendstern (Maiiy) [Insane].osu
-```
-
-Eligible charts: ~**11.9k**; ~**17.4%** have head `tick < 0`.
-
----
-
-## 8. Recommended next steps
-
-1. **New instance:** expand data disk (≥80–100 GB) or accept partial grid cache (~1109+ charts trainable today).
-2. **Stop zombie precompute** if still running: `pkill -f precompute_audio_grid`
-3. **Eval** `trial_multi/step_3000.pt` on random windows (not overfit start_bar).
-4. **Longer training** (20k–50k steps) or tune LR; current 31% acc is early.
-5. **Precompute resume** only after disk fix; script skips existing `.npy` by default.
-6. Optional optimizations: fp16 grids, manifest cache for cond_vec preload, `num_workers>0` DataLoader.
-
----
-
-## 9. What is NOT in git
-
-Data and checkpoints live on the **data disk**, not in `/root/audio2map`:
-
-- `autodl-tmp/audio2map_data/raw/`
-- `autodl-tmp/audio2map_data/processed_v2/`
-
-**Migration plan:** mount/copy only the data disk; `git clone` the repo separately on the new instance.  
-Set `AUDIO2MAP_DATA_ROOT` to wherever the data disk is mounted.
-
----
-
-## 10. Precompute stop / disk check
+## 5. Commands
 
 ```bash
-df -h /root/autodl-tmp
-pgrep -af precompute_audio_grid || echo "not running"
-pkill -f precompute_audio_grid   # if needed
-du -sh /root/autodl-tmp/audio2map_data/*   # find large dirs
-ls processed_v2/audio_grid/*.npy | wc -l   # grid count
+# Grids (maintenance only — precompute done)
+python scripts/audit_audio_grid.py
+
+# Formal train (defaults: require_grid, tick pooling, 50k steps)
+python scripts/train_v2.py
+
+# Single-window debug generate
+python scripts/infer_v2.py --checkpoint .../step_50000.pt --osu "..." \
+  --single-window --start-bar -1
+
+# Split teacher accuracy
+python scripts/eval_v2.py --mode teacher --checkpoint ... --osu "..." --start-bar -1
+
+# ROW / hold stats (no loss changes)
+python scripts/analyze_row_token_stats.py --limit 500
 ```
 
 ---
 
-## 11. Related docs
+## 6. Training mechanics
 
-- [v2_spec.md](v2_spec.md) — full spec + implementation checklist
-- [chart_tokens.md](chart_tokens.md) — legacy 10 ms MVP
-- [data_collection.md](data_collection.md) — Sayobot collector
+| Term | Meaning |
+|------|---------|
+| **step** | One batch (8 windows) → one optimizer update |
+| **preload** | Load all chart bundles into RAM before step loop |
+| **samples/epoch** | `11927 × samples_per_chart` (default 23,854) |
+| **encoder prefix** | tick: **1537** tokens (1 cond + 1536 ticks) per 8-bar window |
+
+Model: **~3.7M params**, vocab **821**, window **8 bars**, cond_vec **23-d**.
+
+---
+
+## 7. Known bugs fixed (do not revert)
+
+See [AUDIO_TEMPORAL_AUDIT.md](AUDIO_TEMPORAL_AUDIT.md), inference first-window fix, `is_valid_audio_grid_cache()`, etc.
+
+---
+
+## 8. Related docs
+
+- [v2_spec.md](v2_spec.md)
+- [AUDIO_TEMPORAL_AUDIT.md](AUDIO_TEMPORAL_AUDIT.md)
+- [PROJECT_CONVERSATION_LOG.md](PROJECT_CONVERSATION_LOG.md)
+- [../configs/README.md](../configs/README.md)

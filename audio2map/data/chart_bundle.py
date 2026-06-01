@@ -13,6 +13,7 @@ from tqdm import tqdm
 from audio2map.data.audio_grid import (
     AudioGridMeta,
     grid_cache_paths,
+    is_valid_audio_grid_cache,
     load_audio_grid,
     resolve_grid_stem,
     slice_audio_window,
@@ -67,7 +68,7 @@ def has_audio_grid(path: Path, *, grid_dir: Path | None = None) -> bool:
         audio_path = find_audio_file(path.parent)
         stem = resolve_grid_stem(audio_path, timing)
         npy, json_path = grid_cache_paths(grid_dir, stem)
-        return npy.is_file() and json_path.is_file()
+        return is_valid_audio_grid_cache(npy, json_path)
     except Exception:
         return False
 
@@ -101,7 +102,7 @@ def preload_chart_bundle(
         stem = resolve_grid_stem(audio_path, timing)
         if require_grid:
             npy, json_path = grid_cache_paths(grid_dir, stem)
-            if not npy.is_file():
+            if not is_valid_audio_grid_cache(npy, json_path):
                 return None
         grid, grid_meta = load_audio_grid(grid_dir, stem)
         meta = chart_meta or compute_chart_meta(path, skip_msd=True)

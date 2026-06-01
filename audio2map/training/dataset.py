@@ -32,6 +32,7 @@ class DatasetConfig:
     samples_per_chart: int = 1
     build_grid_if_missing: bool = True
     require_grid: bool = False
+    lazy: bool = False
 
     def to_window_cfg(self) -> WindowSamplingConfig:
         return WindowSamplingConfig(
@@ -73,20 +74,47 @@ class Audio2MapV2Dataset(Dataset):
 
         if bundles is not None:
             self.bundles = bundles
+            self.lazy = False
+        elif self.cfg.lazy:
+            self.bundles = None
+            self.lazy = True
+            self._bundle_cache: dict[Path, ChartBundle] = {}
+            self._cache_max = min(512, max(64, len(self.osu_paths)))
+            if not self.osu_paths:
+                raise ValueError("no chart paths for lazy dataset")
         else:
             self.bundles = preload_chart_bundles(
                 self.osu_paths,
                 grid_dir=self.grid_dir,
                 require_grid=self.cfg.require_grid and not self.cfg.build_grid_if_missing,
             )
-
-        if not self.bundles:
-            raise ValueError("no chart bundles available for dataset")
+            self.lazy = False
+            if not self.bundles:
+                raise ValueError("no chart bundles available for dataset")
 
     def __len__(self) -> int:
-        return len(self.bundles) * self.cfg.samples_per_chart
+        n = len(self.osu_paths) if self.lazy else len(self.bundles)
+        return n * self.cfg.samples_per_chart
 
     def _bundle_for_index(self, index: int) -> ChartBundle:
+        if self.lazy:
+            from audio2map.data.chart_bundle import preload_chart_bundle
+
+            path = self.osu_paths[index % len(self.osu_paths)]
+            cached = self._bundle_cache.get(path)
+            if cached is not None:
+                return cached
+            bundle = preload_chart_bundle(
+                path,
+                grid_dir=self.grid_dir,
+                require_grid=self.cfg.require_grid and not self.cfg.build_grid_if_missing,
+            )
+            if bundle is None:
+                raise RuntimeError(f"lazy load failed for {path}")
+            if len(self._bundle_cache) >= self._cache_max:
+                self._bundle_cache.pop(next(iter(self._bundle_cache)))
+            self._bundle_cache[path] = bundle
+            return bundle
         return self.bundles[index % len(self.bundles)]
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:

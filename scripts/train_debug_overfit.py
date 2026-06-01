@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from audio2map.training.dataset import Audio2MapV2Dataset, DatasetConfig
-from audio2map.training.model import AudioChartModel
+from audio2map.training.model import build_model
 
 
 def main() -> None:
@@ -30,6 +30,18 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--out", type=str, default=None, help="save final checkpoint .pt")
+    p.add_argument(
+        "--architecture",
+        choices=("enc_dec", "prefix_lm"),
+        default="enc_dec",
+        help="enc_dec=formal encoder-decoder; prefix_lm=legacy ablation only",
+    )
+    p.add_argument(
+        "--audio-pooling",
+        choices=("tick", "bar"),
+        default="tick",
+        help="prefix_lm ablation only",
+    )
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,10 +66,12 @@ def main() -> None:
         collate_fn=Audio2MapV2Dataset.collate_fn,
     )
 
-    model = AudioChartModel(
+    model = build_model(
+        architecture=args.architecture,
         d_model=args.d_model,
-        n_layers=args.layers,
         n_heads=args.heads,
+        layers=args.layers,
+        audio_pooling=args.audio_pooling,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 

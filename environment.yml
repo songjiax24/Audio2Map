@@ -1,3 +1,4 @@
+# Optional conda environment. Prefer uv + pyproject.toml (see README.md).
 name: audio2map
 channels:
   - conda-forge

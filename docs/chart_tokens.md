@@ -1,39 +1,46 @@
-# Chart representation (Phase 1 v2)
+# v2 chart tokens (cheat sheet)
 
-See the v2 spec in project docs. Summary:
+> **Unverified agent notes.** Token semantics: **[OVERVIEW.md](OVERVIEW.md)** §6–11.
 
-## Token window
+Full specification: **[OVERVIEW.md](OVERVIEW.md)** (authoritative). Legacy detail may also appear in [v2_spec.md](v2_spec.md) (unverified).
 
-```
+## Sequence shape
+
+```text
 <BOS>
-<ROW_initial>          # prompt only; states {0, 3}
-<BAR>                  # empty bars still emit BAR
+<ROW_initial>     # window cut-point hold state; loss=0
+<BAR>
 <POS_x> <ROW_abcd>
 ...
 <EOS>
 ```
 
-## ROW states (5-state)
+## Vocab (821)
+
+| Group | Count | Examples |
+|-------|-------|----------|
+| Special | 4 | `<PAD>`, `<BOS>`, `<EOS>`, `<BAR>` |
+| Position | 192 | `<POS_0>` … `<POS_191>` (ticks within one bar) |
+| ROW | 625 | `<ROW_0000>` … `<ROW_4444>` (4 lanes × digits 0–4) |
+
+## ROW digit per lane
 
 | Digit | Meaning |
 |-------|---------|
 | 0 | empty |
 | 1 | tap |
-| 2 | hold_start |
-| 3 | hold_active |
-| 4 | hold_end |
+| 2 | hold start |
+| 3 | hold active |
+| 4 | hold end |
 
-- Vocab: 625 ROW tokens (`<ROW_0000>` … `<ROW_4444>`); model predicts only event rows (≥1 of `{1,2,4}`).
-- Initial ROW: 16 combinations of `{0,3}` only.
-- Time grid: canonical BPM, 48 ticks/beat, 192 ticks/bar.
+Difficulty / SR / pattern info is **not** tokenized — it goes through **cond_vec** (23 floats).
 
-## API
+## Code entrypoints
 
 ```python
 from audio2map.osu.row_tokens import beatmap_to_row_tokens, build_vocab, CanonicalTiming
-from audio2map.osu.round_trip import round_trip_beatmap, quantize_notes
-from audio2map.pattern_analyser import analyze_osu
-from audio2map.osu.bpm import canonicalize_bpm
+from audio2map.osu.round_trip import round_trip_beatmap, quantize_notes, tokens_to_notes
+from audio2map.training.decode import decode_window_tokens
 ```
 
-Legacy 10ms sparse events remain in `audio2map.osu.events` for archived `processed/`.
+Legacy 10 ms sparse events (removed from training): `audio2map.legacy`.

@@ -1,9 +1,9 @@
 """Chart representation for models (sparse absolute events).
 
-See :mod:`audio2map.osu.events` and ``docs/chart_tokens.md``.
+See :mod:`audio2map.legacy.events`. v2 uses ``audio2map.osu.row_tokens``.
 """
 
-from audio2map.osu.events import (
+from audio2map.legacy.events import (
     DEFAULT_HOP_MS,
     ChartEvent,
     EventType,
