@@ -60,7 +60,7 @@ def main() -> None:
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         path = Path(args.osu)
         model = load_checkpoint(Path(args.checkpoint), device)
-        cond = build_cond_vec(compute_chart_meta(path, skip_msd=True))
+        cond = build_cond_vec(compute_chart_meta(path))
         stats = eval_inference_chart(
             model,
             path,

@@ -64,17 +64,11 @@ def audio_bar_range_ms(
 
 def train_sample_bar_range(
     *,
-    chart_start_bar: int,
-    chart_end_bar: int,
     audio_start_bar: int,
     audio_end_bar: int,
-    pre_event_margin_bars: int = 4,
-    post_event_margin_bars: int = 4,
 ) -> tuple[int, int]:
-    """``[train_start_bar, train_end_bar)`` for window sampling."""
-    train_start = max(audio_start_bar, chart_start_bar - pre_event_margin_bars)
-    train_end = min(audio_end_bar, chart_end_bar + post_event_margin_bars)
-    return train_start, train_end
+    """``[train_start_bar, train_end_bar)`` for window sampling (full audio span)."""
+    return audio_start_bar, audio_end_bar
 
 
 def tick_to_array_index(absolute_tick: int, tick_min_audio: int) -> int:

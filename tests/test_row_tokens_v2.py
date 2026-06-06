@@ -19,6 +19,7 @@ from audio2map.osu.row_tokens import (
     encode_window_tokens,
     is_event_row,
     is_initial_row,
+    is_legal_row,
     row_state_to_token,
     split_tick,
     validate_token_sequence,
@@ -61,6 +62,12 @@ def test_initial_vs_event_rows() -> None:
     assert not is_initial_row((1, 0, 0, 0))
     assert is_event_row((0, 0, 2, 0))
     assert not is_event_row((0, 3, 0, 0))
+
+
+def test_is_legal_row_hold_lane_cannot_be_empty() -> None:
+    active = [True, False, False, False]
+    assert is_legal_row((3, 1, 0, 0), active)
+    assert not is_legal_row((0, 1, 0, 0), active)
 
 
 def test_split_negative_tick() -> None:

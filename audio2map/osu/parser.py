@@ -91,10 +91,16 @@ def _parse_metadata(sections: dict[str, list[str]]) -> ChartMetadata:
 
 def _parse_notes(lines: list[str]) -> list[ManiaNote]:
     notes: list[ManiaNote] = []
+    seen: set[tuple[int, int, NoteType]] = set()
     for line in lines:
         note = parse_hit_object(line)
-        if note is not None:
-            notes.append(note)
+        if note is None:
+            continue
+        key = (note.time_ms, note.col, note.note_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        notes.append(note)
     notes.sort(key=lambda n: (n.time_ms, n.col, n.note_type.value))
     return notes
 

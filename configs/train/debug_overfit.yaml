@@ -10,9 +10,7 @@ steps: 500
 batch_size: 1
 log_every: 50
 
-window_bars_choices: [8]
-pre_event_margin_bars: 4
-post_event_margin_bars: 4
+window_bars: 16
 
 # Example chart with pre-offset events
 # osu: /root/autodl-tmp/audio2map_data/raw/2127527/seatrus - Abendstern (Maiiy) [Insane].osu

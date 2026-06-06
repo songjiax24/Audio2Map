@@ -13,6 +13,7 @@ from tqdm import tqdm
 from audio2map.difficulty.chart_meta import compute_chart_meta
 from audio2map.osu.mania import is_mania_4k_sections
 from audio2map.osu.parser import parse_sections
+from audio2map.data.eligible_charts import list_eligible_osu_paths
 from audio2map.utils.paths import chart_meta_dir, raw_dir
 
 
@@ -45,6 +46,11 @@ def main() -> None:
     )
     p.add_argument("--skip-msd", action="store_true", help="only compute official SR + hold ratio")
     p.add_argument("--resume", action="store_true", help="skip paths already in output manifest")
+    p.add_argument(
+        "--eligible-only",
+        action="store_true",
+        help="only Phase-1 eligible charts (matches train_v2 pool)",
+    )
     args = p.parse_args()
 
     out_path = args.out or (chart_meta_dir() / "manifest.jsonl")
@@ -62,7 +68,7 @@ def main() -> None:
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-    paths = _iter_mania_4k_osu(args.root)
+    paths = list_eligible_osu_paths(args.root) if args.eligible_only else _iter_mania_4k_osu(args.root)
     if args.limit:
         paths = paths[: args.limit]
 

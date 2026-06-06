@@ -56,6 +56,7 @@ class ChartMeta:
 
 
 def compute_chart_meta(path: Path | str, *, skip_msd: bool = False) -> ChartMeta:
+    """Compute per-chart metadata. Component failures are recorded in ``error``."""
     path = Path(path)
     try:
         beatmap = parse_beatmap(path)
@@ -64,24 +65,33 @@ def compute_chart_meta(path: Path | str, *, skip_msd: bool = False) -> ChartMeta
         ct = CanonicalTiming.from_beatmap(beatmap)
         ln_ratio = hold_ratio(beatmap)
         ln_cov = hold_coverage(beatmap, ct)
+        errors: list[str] = []
 
         sr: float | None = None
-        msd = None
         try:
             sr = official_star_rating(path)
         except Exception as exc:
-            return _error_meta(path, beatmap, timing, tmeta, ln_ratio, ln_cov, f"official_sr: {exc}")
+            errors.append(f"official_sr: {exc}")
 
+        msd = None
         if not skip_msd:
             try:
                 msd = compute_msd(beatmap)
             except MinaCalcError as exc:
-                return _error_meta(
-                    path, beatmap, timing, tmeta, ln_ratio, ln_cov, f"msd: {exc}", sr=sr
-                )
+                errors.append(f"msd: {exc}")
+            except Exception as exc:
+                errors.append(f"msd: {exc}")
 
-        pat = analyze_chart_patterns(path)
-        core = pat.core_dist if pat.analyzer_available else {}
+        pat = None
+        core: dict[str, float | None] = {}
+        try:
+            pat = analyze_chart_patterns(path)
+            if not pat.analyzer_available:
+                errors.append(f"analyzer: {pat.error or 'unavailable'}")
+            else:
+                core = pat.core_dist
+        except Exception as exc:
+            errors.append(f"analyzer: {exc}")
 
         return ChartMeta(
             osu_path=str(path),
@@ -107,16 +117,17 @@ def compute_chart_meta(path: Path | str, *, skip_msd: bool = False) -> ChartMeta
             msd_jack_speed=msd.jack_speed if msd else None,
             msd_chordjack=msd.chordjack if msd else None,
             msd_technical=msd.technical if msd else None,
-            analyzer_ln_percent=pat.ln_percent if pat.analyzer_available else None,
-            analyzer_hb_row_ratio=pat.hb_row_ratio if pat.analyzer_available else None,
+            analyzer_ln_percent=pat.ln_percent if pat and pat.analyzer_available else None,
+            analyzer_hb_row_ratio=pat.hb_row_ratio if pat and pat.analyzer_available else None,
             analyzer_stream=core.get("Stream"),
             analyzer_chordstream=core.get("Chordstream"),
             analyzer_jacks=core.get("Jacks"),
             analyzer_coordination=core.get("Coordination"),
             analyzer_density=core.get("Density"),
             analyzer_wildcard=core.get("Wildcard"),
-            analyzer_available=1 if pat.analyzer_available else 0,
+            analyzer_available=1 if pat and pat.analyzer_available else 0,
             msd_available=1 if msd else 0,
+            error="; ".join(errors) if errors else None,
         )
     except Exception as exc:
         return ChartMeta(
@@ -145,32 +156,3 @@ def compute_chart_meta(path: Path | str, *, skip_msd: bool = False) -> ChartMeta
             msd_technical=None,
             error=str(exc),
         )
-
-
-def _error_meta(path, beatmap, timing, tmeta, ln_ratio, ln_cov, message, *, sr=None):
-    return ChartMeta(
-        osu_path=str(path),
-        set_id=beatmap.metadata.beatmap_set_id,
-        beatmap_id=beatmap.metadata.beatmap_id,
-        version=beatmap.metadata.version,
-        constant_bpm=timing.constant_bpm,
-        bpm=timing.bpm_primary,
-        original_bpm=tmeta.get("original_bpm"),
-        canonical_bpm=tmeta.get("canonical_bpm"),
-        bpm_scale_exp=tmeta.get("bpm_scale_exp"),
-        offset_ms=tmeta.get("offset_ms"),
-        meter=tmeta.get("meter"),
-        note_count=beatmap.note_count,
-        hold_ratio=ln_ratio,
-        hold_coverage=ln_cov,
-        official_sr=sr,
-        msd_overall=None,
-        msd_stream=None,
-        msd_jumpstream=None,
-        msd_handstream=None,
-        msd_stamina=None,
-        msd_jack_speed=None,
-        msd_chordjack=None,
-        msd_technical=None,
-        error=message,
-    )

@@ -1,4 +1,4 @@
-"""Overlap window generation and full-chart inference."""
+"""Overlap-window inference: slide fixed-size audio windows and stitch chart notes."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import torch.nn.functional as F
 
 from audio2map.data.audio_grid import load_audio_grid, resolve_grid_stem, slice_audio_window
 from audio2map.data.window_sampler import audio_bar_range_from_duration
-from audio2map.osu.grid_config import TICKS_PER_BAR
 from audio2map.osu.row_tokens import (
+    TOKEN_BAR,
     TOKEN_BOS,
     TOKEN_EOS,
     CanonicalTiming,
@@ -25,8 +25,9 @@ from audio2map.osu.row_tokens import (
     split_tick,
 )
 from audio2map.osu.round_trip import tokens_to_notes
-from audio2map.osu.schema import ManiaNote, NoteType
+from audio2map.osu.schema import ManiaNote
 from audio2map.training.decode import ChartDecodeState, bos_initial_prefix
+from audio2map.training.config import MAX_DECODER_LEN
 from audio2map.training.model import AudioChartModel
 from audio2map.utils.paths import audio_grid_dir
 
@@ -35,11 +36,13 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class OverlapConfig:
-    window_bars: int = 8
-    context_bars: int = 4
+    """``context + keep + future = window_bars`` (default 8+4+4=16)."""
+
+    window_bars: int = 16
+    context_bars: int = 8
     keep_bars: int = 4
-    future_bars: int = 0
-    max_seq_len: int = 512
+    future_bars: int = 4
+    max_seq_len: int = MAX_DECODER_LEN
 
     def __post_init__(self) -> None:
         if self.context_bars + self.keep_bars + self.future_bars != self.window_bars:
@@ -51,7 +54,7 @@ class OverlapConfig:
 
 @dataclass(frozen=True, slots=True)
 class GenerationRangeConfig:
-    """Inference bar range. Default covers full audio (no reference-chart truncation)."""
+    """``audio_full`` = whole mp3; ``reference_chart`` = clip to chart event bars."""
 
     mode: Literal["audio_full", "reference_chart"] = "audio_full"
     pre_margin_bars: int = 0
@@ -124,6 +127,7 @@ def resolve_generation_bar_range(
     chart_end_bar: int | None,
     cfg: GenerationRangeConfig,
 ) -> tuple[int, int]:
+    """Resolve ``[gen_start_bar, gen_end_bar)`` from audio/chart bounds and ``mode``."""
     if cfg.mode == "reference_chart" and chart_start_bar is not None and chart_end_bar is not None:
         gen_start = max(audio_start_bar, chart_start_bar - cfg.pre_margin_bars)
         gen_end = min(audio_end_bar, chart_end_bar + cfg.post_margin_bars)
@@ -137,23 +141,41 @@ def overlap_inference_bar_windows(
     cfg: OverlapConfig,
 ) -> list[tuple[int, int, int, int, int]]:
     """Return ``(win_start, win_end, keep_start, keep_end, context_bars_used)``."""
+    if gen_start_bar >= gen_end_bar:
+        return []
+
+    if gen_end_bar - gen_start_bar <= cfg.window_bars:
+        s = gen_start_bar
+        return [(s, s + cfg.window_bars, s, gen_end_bar, 0)]
+
     windows: list[tuple[int, int, int, int, int]] = []
-    bar = gen_start_bar
+    commit = gen_start_bar
     first = True
-    while bar < gen_end_bar:
-        win_end = min(bar + cfg.window_bars, gen_end_bar)
-        win_start = win_end - cfg.window_bars
-        if win_start < gen_start_bar:
+
+    while commit < gen_end_bar:
+        if first:
+            keep_start = commit
+            keep_end = commit + cfg.context_bars
             win_start = gen_start_bar
-        actual_context = 0 if first else cfg.context_bars
-        keep_start = win_start + actual_context
-        keep_end = min(keep_start + cfg.keep_bars, win_end)
-        if keep_end > keep_start:
-            windows.append((win_start, win_end, keep_start, keep_end, actual_context))
-        if win_end >= gen_end_bar:
-            break
-        bar += cfg.keep_bars
-        first = False
+            win_end = win_start + cfg.window_bars
+            windows.append((win_start, win_end, keep_start, keep_end, 0))
+            commit = keep_end
+            first = False
+        else:
+            keep_start = commit
+            win_start = keep_start - cfg.context_bars
+            win_end = win_start + cfg.window_bars
+
+            if win_end <= gen_end_bar:
+                keep_end = keep_start + cfg.keep_bars
+            else:
+                win_end = gen_end_bar
+                win_start = gen_end_bar - cfg.window_bars
+                keep_end = gen_end_bar
+
+            windows.append((win_start, win_end, keep_start, keep_end, cfg.context_bars))
+            commit = keep_end
+
     return windows
 
 
@@ -191,16 +213,143 @@ def sample_next_token_id(
     return allowed_list[idx]
 
 
-def initial_row_at_tick(notes: list[ManiaNote], timing: CanonicalTiming, window_start_tick: int):
-    active = [False, False, False, False]
-    for note in notes:
-        if note.note_type != NoteType.HOLD or note.end_time_ms is None:
+def initial_row_from_committed_bars(
+    committed_bars: dict[int, list[int]],
+    *,
+    gen_start: int,
+    win_start: int,
+    vocab: dict[str, int],
+):
+    """Replay committed chart tokens before ``win_start`` to get hold state at window open."""
+    if win_start <= gen_start:
+        return (0, 0, 0, 0)
+
+    decode = ChartDecodeState.from_initial_row(
+        (0, 0, 0, 0),
+        window_bars=max(1, win_start - gen_start),
+        vocab=vocab,
+    )
+    for bar in range(gen_start, win_start):
+        for tid in committed_bars.get(bar, []):
+            decode.observe_and_advance_bar_if_needed(tid)
+    return initial_row_from_active(decode.active_hold)
+
+
+def extract_bar_token_ids(
+    token_ids: list[int],
+    id_to_token: dict[int, str],
+    *,
+    win_start_bar: int,
+    bar: int,
+) -> list[int]:
+    """Token ids for a single absolute bar from one window generation."""
+    tokens = [id_to_token[i] for i in token_ids]
+    current_bar = win_start_bar - 1
+    i = 2
+    while i < len(tokens) and tokens[i] != TOKEN_EOS:
+        if tokens[i] != TOKEN_BAR:
+            i += 1
             continue
-        head = ms_to_tick(note.time_ms, timing)
-        tail = ms_to_tick(note.end_time_ms, timing)
-        if head < window_start_tick < tail:
-            active[note.col] = True
-    return initial_row_from_active(active)
+        current_bar += 1
+        if current_bar != bar:
+            i += 1
+            continue
+        out = [token_ids[i]]
+        i += 1
+        while i < len(tokens) and tokens[i] not in (TOKEN_BAR, TOKEN_EOS):
+            out.append(token_ids[i])
+            i += 1
+        return out
+    return []
+
+
+def extract_bar_range_token_ids(
+    token_ids: list[int],
+    id_to_token: dict[int, str],
+    *,
+    win_start_bar: int,
+    range_start_bar: int,
+    range_end_bar: int,
+) -> list[int]:
+    out: list[int] = []
+    for bar in range(range_start_bar, range_end_bar):
+        out.extend(
+            extract_bar_token_ids(
+                token_ids,
+                id_to_token,
+                win_start_bar=win_start_bar,
+                bar=bar,
+            )
+        )
+    return out
+
+
+def build_context_prompt_token_ids(
+    *,
+    committed_bars: dict[int, list[int]],
+    win_start: int,
+    keep_start: int,
+    initial_row,
+    vocab: dict[str, int],
+) -> list[int] | None:
+    """``<BOS> + <ROW_initial> + committed keep tokens for [win_start, keep_start)``."""
+    if keep_start <= win_start:
+        return None
+
+    from audio2map.osu.row_tokens import TOKEN_BAR, row_state_to_token
+
+    body: list[int] = []
+    for bar in range(win_start, keep_start):
+        if bar in committed_bars:
+            body.extend(committed_bars[bar])
+        else:
+            log.warning(
+                "missing committed tokens for context bar %d (win_start=%d keep_start=%d)",
+                bar,
+                win_start,
+                keep_start,
+            )
+            body.append(vocab[TOKEN_BAR])
+
+    prefix = bos_initial_prefix(vocab[row_state_to_token(initial_row)], vocab=vocab)
+    return prefix + body
+
+
+def commit_keep_bar_tokens(
+    committed_bars: dict[int, list[int]],
+    *,
+    token_ids: list[int],
+    id_to_token: dict[int, str],
+    win_start: int,
+    keep_start: int,
+    keep_end: int,
+) -> None:
+    for bar in range(keep_start, keep_end):
+        bar_ids = extract_bar_token_ids(
+            token_ids, id_to_token, win_start_bar=win_start, bar=bar
+        )
+        if bar_ids:
+            committed_bars[bar] = bar_ids
+
+
+def assemble_chart_token_ids(
+    committed_bars: dict[int, list[int]],
+    *,
+    gen_start: int,
+    gen_end: int,
+    vocab: dict[str, int],
+) -> list[int]:
+    """Merge per-bar keep tokens into one chart sequence for export."""
+    from audio2map.osu.row_tokens import row_state_to_token
+
+    initial = initial_row_from_committed_bars(
+        committed_bars, gen_start=gen_start, win_start=gen_start, vocab=vocab
+    )
+    out = bos_initial_prefix(vocab[row_state_to_token(initial)], vocab=vocab)
+    for bar in range(gen_start, gen_end):
+        out.extend(committed_bars.get(bar, [vocab[TOKEN_BAR]]))
+    out.append(vocab[TOKEN_EOS])
+    return out
 
 
 @torch.no_grad()
@@ -215,11 +364,17 @@ def generate_window_tokens(
     temperature: float = 0.8,
     top_p: float = 0.95,
     top_k: int = 50,
+    max_seq_len: int | None = None,
     prompt_token_ids: list[int] | None = None,
 ) -> list[int]:
-    """Generate one window token sequence (including BOS/EOS)."""
+    """Generate one window token sequence (including BOS/EOS).
+
+    When ``prompt_token_ids`` is set, it must be
+    ``<BOS> + <ROW_initial> + context chart tokens`` for overlap windows.
+    """
     from audio2map.osu.row_tokens import build_vocab, row_state_to_token
 
+    cap = model.max_seq_len if max_seq_len is None else min(model.max_seq_len, max_seq_len)
     vocab = build_vocab()
     id_to_token = invert_vocab(vocab)
     initial_id = vocab[row_state_to_token(initial_row)]
@@ -232,11 +387,13 @@ def generate_window_tokens(
     decode = ChartDecodeState.from_initial_row(initial_row, window_bars=window_bars, vocab=vocab)
     for tid in token_ids[2:]:
         decode.observe(tid)
+    if prompt_token_ids is not None and len(token_ids) > 2:
+        decode.require_bar_after_prompt()
 
     audio_b = audio.unsqueeze(0).to(device)
     cond_b = cond_vec.unsqueeze(0).to(device)
 
-    while not decode.finished and len(token_ids) < model.max_seq_len:
+    while not decode.finished and len(token_ids) < cap:
         ids = torch.tensor([token_ids], dtype=torch.long, device=device)
         logits = model.next_token_logits(audio_b, cond_b, ids)[0]
         allowed = decode.allowed_token_ids()
@@ -257,21 +414,6 @@ def generate_window_tokens(
     if token_ids[-1] != vocab[TOKEN_EOS]:
         token_ids.append(vocab[TOKEN_EOS])
     return token_ids
-
-
-def filter_notes_by_tick_range(
-    notes: list[ManiaNote],
-    timing: CanonicalTiming,
-    *,
-    keep_start_tick: int,
-    keep_end_tick: int,
-) -> list[ManiaNote]:
-    kept: list[ManiaNote] = []
-    for n in notes:
-        tick = ms_to_tick(n.time_ms, timing)
-        if keep_start_tick <= tick < keep_end_tick:
-            kept.append(n)
-    return kept
 
 
 def dedupe_notes(notes: list[ManiaNote]) -> list[ManiaNote]:
@@ -312,9 +454,10 @@ def generate_chart_notes(
     reference_notes: list[ManiaNote] | None = None,
     return_report: bool = False,
 ) -> list[ManiaNote] | tuple[list[ManiaNote], GenerationReport]:
-    """Generate chart notes. Default range = full audio (not reference-chart clipped)."""
+    """Generate notes for a chart; default range is full mp3 (``audio_full``)."""
     from audio2map.audio.loader import find_audio_file
     from audio2map.osu.parser import parse_beatmap
+    from audio2map.osu.row_tokens import build_vocab
 
     overlap = overlap or OverlapConfig()
     range_cfg = range_cfg or GenerationRangeConfig()
@@ -334,14 +477,16 @@ def generate_chart_notes(
         grid = features
 
     audio_start, audio_end = audio_bar_range_from_duration(meta.duration_ms, timing)
-    if reference_notes is None:
+    chart_start: int | None = None
+    chart_end: int | None = None
+    if reference_notes is not None:
+        chart_start, chart_end = chart_event_bar_range(reference_notes, timing)
+    elif range_cfg.mode == "reference_chart" or return_report:
         try:
-            reference_notes = parse_beatmap(audio_path).notes
+            ref = parse_beatmap(audio_path).notes
+            chart_start, chart_end = chart_event_bar_range(ref, timing)
         except Exception:
-            reference_notes = None
-    chart_start, chart_end = (
-        chart_event_bar_range(reference_notes, timing) if reference_notes else (None, None)
-    )
+            pass
     gen_start, gen_end = resolve_generation_bar_range(
         audio_start_bar=audio_start,
         audio_end_bar=audio_end,
@@ -370,8 +515,9 @@ def generate_chart_notes(
 
     model = model.to(device)
     cond_t = torch.tensor(cond_vec, dtype=torch.float32, device=device)
-    all_notes: list[ManiaNote] = []
     id_to_token = invert_vocab()
+    vocab = build_vocab()
+    committed_bars: dict[int, list[int]] = {}
 
     for win_start, win_end, keep_start, keep_end, ctx_used in windows:
         window_bars = win_end - win_start
@@ -379,8 +525,20 @@ def generate_chart_notes(
         report.audio_ticks_per_window = audio_slice.shape[0]
         report.encoder_prefix_len = audio_slice.shape[0]
 
-        win_start_tick = win_start * TICKS_PER_BAR
-        initial = initial_row_at_tick(all_notes, timing, win_start_tick)
+        initial = initial_row_from_committed_bars(
+            committed_bars, gen_start=gen_start, win_start=win_start, vocab=vocab
+        )
+        prompt_ids = (
+            build_context_prompt_token_ids(
+                committed_bars=committed_bars,
+                win_start=win_start,
+                keep_start=keep_start,
+                initial_row=initial,
+                vocab=vocab,
+            )
+            if ctx_used > 0
+            else None
+        )
         token_ids = generate_window_tokens(
             model,
             audio=torch.tensor(audio_slice, dtype=torch.float32),
@@ -391,18 +549,33 @@ def generate_chart_notes(
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            max_seq_len=overlap.max_seq_len,
+            prompt_token_ids=prompt_ids,
         )
         tokens = [id_to_token[i] for i in token_ids]
         if tokens[0] != TOKEN_BOS or tokens[-1] != TOKEN_EOS:
+            log.warning(
+                "skip window win=[%d,%d) keep=[%d,%d): invalid token boundaries "
+                "(first=%r last=%r len=%d)",
+                win_start,
+                win_end,
+                keep_start,
+                keep_end,
+                tokens[0] if tokens else None,
+                tokens[-1] if tokens else None,
+                len(tokens),
+            )
             continue
-        win_notes = tokens_to_notes(tokens, timing, start_bar=win_start)
-        keep_start_tick = keep_start * TICKS_PER_BAR
-        keep_end_tick = keep_end * TICKS_PER_BAR
-        kept = filter_notes_by_tick_range(
-            win_notes, timing, keep_start_tick=keep_start_tick, keep_end_tick=keep_end_tick
+        commit_keep_bar_tokens(
+            committed_bars,
+            token_ids=token_ids,
+            id_to_token=id_to_token,
+            win_start=win_start,
+            keep_start=keep_start,
+            keep_end=keep_end,
         )
-        all_notes.extend(kept)
-        is_first = win_start == gen_start and ctx_used == 0
+        is_first = ctx_used == 0
+        bars_kept = keep_end - keep_start
         report.windows.append(
             WindowGenerationLog(
                 win_start=win_start,
@@ -411,21 +584,25 @@ def generate_chart_notes(
                 keep_end=keep_end,
                 context_bars=ctx_used,
                 is_first_window=is_first,
-                notes_kept=len(kept),
+                notes_kept=bars_kept,
             )
         )
         log.info(
-            "window win=[%d,%d) keep=[%d,%d) ctx=%d first=%s kept=%d",
+            "window win=[%d,%d) keep=[%d,%d) ctx=%d first=%s bars_kept=%d",
             win_start,
             win_end,
             keep_start,
             keep_end,
             ctx_used,
             is_first,
-            len(kept),
+            bars_kept,
         )
 
-    notes = dedupe_notes(all_notes)
+    chart_token_ids = assemble_chart_token_ids(
+        committed_bars, gen_start=gen_start, gen_end=gen_end, vocab=vocab
+    )
+    chart_tokens = [id_to_token[i] for i in chart_token_ids]
+    notes = dedupe_notes(tokens_to_notes(chart_tokens, timing, start_bar=gen_start))
     first_b, last_b = _note_bar_range(notes, timing)
     report.first_note_bar = first_b
     report.last_note_bar = last_b

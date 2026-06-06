@@ -18,6 +18,7 @@ class FilterReason(str, Enum):
     VARIABLE_BPM = "variable_bpm"
     VARIABLE_METER = "variable_meter"
     METER_NOT_4 = "meter_not_4"
+    NO_NOTES = "no_notes"
 
 
 REQUIRED_METER = 4
@@ -31,7 +32,12 @@ class EligibilityResult:
 
 def check_beatmap_eligibility(beatmap: Beatmap) -> EligibilityResult:
     timing = summarize_beatmap_timing(beatmap)
-    return _eligibility_from_timing(timing)
+    result = _eligibility_from_timing(timing)
+    if not result.eligible:
+        return result
+    if beatmap.note_count == 0:
+        return EligibilityResult(False, FilterReason.NO_NOTES)
+    return EligibilityResult(True)
 
 
 def check_osu_path(path: Path | str) -> EligibilityResult:
@@ -46,7 +52,12 @@ def check_osu_path(path: Path | str) -> EligibilityResult:
         return EligibilityResult(False, FilterReason.NOT_4K)
 
     timing = summarize_timing(parse_timing_points(sections.get("[TimingPoints]", [])))
-    return _eligibility_from_timing(timing)
+    result = _eligibility_from_timing(timing)
+    if not result.eligible:
+        return result
+    if not _hit_objects_section_nonempty(sections.get("[HitObjects]", [])):
+        return EligibilityResult(False, FilterReason.NO_NOTES)
+    return EligibilityResult(True)
 
 
 def check_parsed_beatmap(path: Path | str) -> EligibilityResult:
@@ -56,6 +67,10 @@ def check_parsed_beatmap(path: Path | str) -> EligibilityResult:
     except (ValueError, OSError):
         return EligibilityResult(False, FilterReason.NOT_4K)
     return check_beatmap_eligibility(beatmap)
+
+
+def _hit_objects_section_nonempty(lines: list[str]) -> bool:
+    return any(line.strip() for line in lines)
 
 
 def _eligibility_from_timing(timing) -> EligibilityResult:

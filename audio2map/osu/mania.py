@@ -4,23 +4,22 @@ from __future__ import annotations
 
 from audio2map.osu.schema import ManiaNote, NoteType
 
-# Standard 4K column x positions (CircleSize=4).
+# Standard 4K column x for export (osu! editor default layout).
 COL4K_X = (64, 192, 320, 448)
 
 HIT_HOLD = 128  # mania long note (LN) head
 
 
-def x_to_column(x: int, *, keys: int = 4) -> int | None:
-    """Map hit object ``x`` to column index, or ``None`` if unrecognised."""
+def x_to_column(x: int, *, keys: int = 4) -> int:
+    """Map hit object ``x`` to column index (osu!/Prelude: ``int(x / 512 * keys)``)."""
     if keys != 4:
         raise NotImplementedError("only 4K column mapping is implemented")
-    if x in COL4K_X:
-        return COL4K_X.index(x)
-    # Tolerate small editor rounding errors.
-    nearest = min(COL4K_X, key=lambda cx: abs(cx - x))
-    if abs(nearest - x) <= 2:
-        return COL4K_X.index(nearest)
-    return None
+    col = int(float(x) / 512.0 * float(keys))
+    if col < 0:
+        col = 0
+    if col > keys - 1:
+        col = keys - 1
+    return col
 
 
 def is_mania_4k_sections(sections: dict[str, list[str]]) -> bool:
@@ -50,8 +49,6 @@ def parse_hit_object(line: str) -> ManiaNote | None:
         return None
 
     col = x_to_column(x)
-    if col is None:
-        return None
 
     if type_bits & HIT_HOLD:
         end_time_ms = _parse_hold_end(parts[5:])

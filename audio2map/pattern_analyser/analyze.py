@@ -49,22 +49,13 @@ def _core_distribution(clusters) -> dict[str, float]:
 def analyze_osu(path: Path | str) -> PatternFeatures:
     """Analyze pattern features for a mania .osu file."""
     path = Path(path)
-    try:
-        chart = parse_osu_mania(str(path))
-        report = from_chart(chart)
-        return PatternFeatures(
-            ln_percent=float(report.LNPercent),
-            hb_row_ratio=float(report.HBRowRatio),
-            core_dist=_core_distribution(report.Clusters),
-            mode_tag=str(report.ModeTag),
-            category=str(report.Category),
-            analyzer_available=True,
-        )
-    except Exception as exc:
-        return PatternFeatures(
-            ln_percent=0.0,
-            hb_row_ratio=0.0,
-            core_dist={p.value: 0.0 for p in CORE_PATTERNS},
-            analyzer_available=False,
-            error=str(exc),
-        )
+    chart = parse_osu_mania(str(path))
+    report = from_chart(chart)
+    return PatternFeatures(
+        ln_percent=float(report.LNPercent),
+        hb_row_ratio=float(report.HBRowRatio),
+        core_dist=_core_distribution(report.Clusters),
+        mode_tag=str(report.ModeTag),
+        category=str(report.Category),
+        analyzer_available=True,
+    )

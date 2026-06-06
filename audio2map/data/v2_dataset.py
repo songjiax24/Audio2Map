@@ -18,7 +18,7 @@ from audio2map.data.audio_grid import (
     slice_audio_window,
 )
 from audio2map.data.chart_filter import check_beatmap_eligibility
-from audio2map.data.cond_vec import build_cond_vec
+from audio2map.data.cond_vec import CondVecError, build_cond_vec
 from audio2map.data.window_sampler import (
     WindowSamplingConfig,
     audio_bar_range_from_duration,
@@ -29,7 +29,7 @@ from audio2map.data.window_sampler import (
 from audio2map.difficulty.chart_meta import ChartMeta, compute_chart_meta
 from audio2map.osu.parser import parse_beatmap
 from audio2map.osu.row_tokens import CanonicalTiming, beatmap_to_window_tokens, build_vocab
-from audio2map.osu.grid_config import TICKS_PER_BAR
+from audio2map.osu.grid_config import TICKS_PER_BAR, WINDOW_BARS
 from audio2map.utils.paths import audio_grid_dir
 
 
@@ -109,8 +109,6 @@ def build_training_sample(
 
     if start_bar is None:
         sampled = sample_window_bars(
-            chart_start_bar=chart_start,
-            chart_end_bar=chart_end,
             audio_start_bar=audio_start,
             audio_end_bar=audio_end,
             cfg=cfg,
@@ -120,7 +118,7 @@ def build_training_sample(
             return None
         start_bar, end_bar = sampled
     else:
-        end_bar = start_bar + cfg.window_bars
+        end_bar = start_bar + WINDOW_BARS
 
     tokens = beatmap_to_window_tokens(
         beatmap,
@@ -131,7 +129,13 @@ def build_training_sample(
     vocab = build_vocab()
     token_ids = [vocab[t] for t in tokens]
     loss_mask = build_loss_mask(tokens)
-    cond = build_cond_vec(chart_meta or compute_chart_meta(osu_path, skip_msd=True))
+    try:
+        cond = build_cond_vec(chart_meta or compute_chart_meta(osu_path))
+    except CondVecError as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("%s", exc)
+        return None
 
     audio_features, slice_info = slice_audio_window(grid, grid_meta, start_bar, end_bar)
 

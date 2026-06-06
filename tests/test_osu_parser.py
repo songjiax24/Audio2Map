@@ -1,20 +1,12 @@
-"""Tests for osu! parser and archived sparse-event helpers."""
+"""Tests for osu! parser."""
 
 from pathlib import Path
 
 import pytest
 
-from audio2map.legacy import (
-    CellState,
-    EventType,
-    beatmap_to_events,
-    event_ar_tokens,
-    events_to_frames,
-    notes_to_events,
-)
 from audio2map.osu import parse_beatmap
 from audio2map.osu.mania import parse_hit_object, x_to_column
-from audio2map.osu.schema import ManiaNote, NoteType
+from audio2map.osu.parser import _parse_notes
 from audio2map.utils.paths import raw_dir
 
 RAW = raw_dir()
@@ -22,32 +14,23 @@ RAW = raw_dir()
 
 @pytest.mark.parametrize(
     ("x", "col"),
-    [(64, 0), (192, 1), (320, 2), (448, 3)],
+    [
+        (64, 0),
+        (192, 1),
+        (320, 2),
+        (448, 3),
+        (0, 0),
+        (128, 1),
+        (256, 2),
+        (384, 3),
+        (358, 2),
+        (51, 0),
+        (96, 0),
+        (480, 3),
+    ],
 )
 def test_x_to_column(x: int, col: int) -> None:
     assert x_to_column(x) == col
-
-
-def test_sparse_events_absolute_not_delta() -> None:
-    notes = [
-        ManiaNote(time_ms=1000, col=1, note_type=NoteType.TAP),
-        ManiaNote(time_ms=5000, col=0, note_type=NoteType.HOLD, end_time_ms=5200),
-    ]
-    events = notes_to_events(notes, hop_ms=10)
-    assert len(events) == 2
-    assert events[0].frame == 100
-    assert events[1].frame == 500
-    assert events[1].end_frame == 520
-    assert event_ar_tokens(events[0]) == (100, 1, 0)
-    assert event_ar_tokens(events[1]) == (500, 0, 1, 520)
-
-
-def test_events_shorter_than_dense_grid() -> None:
-    notes = [ManiaNote(time_ms=100, col=0, note_type=NoteType.TAP)]
-    events = notes_to_events(notes, hop_ms=10)
-    grid = events_to_frames(events, duration_ms=10_000)
-    assert len(events) == 1
-    assert grid.num_frames * 4 > len(events)
 
 
 def test_parse_real_beatmap() -> None:
@@ -55,7 +38,63 @@ def test_parse_real_beatmap() -> None:
     if not path.exists():
         pytest.skip("dataset not present")
     bm = parse_beatmap(path)
-    events = beatmap_to_events(bm)
-    assert len(events) == bm.note_count
-    grid = events_to_frames(events, duration_ms=bm.duration_ms + 500)
-    assert grid.grid[events[0].frame, events[0].col] != CellState.EMPTY
+    assert len(bm.notes) == bm.note_count
+    assert bm.duration_ms > 0
+
+
+def test_parse_hit_object_tap() -> None:
+    note = parse_hit_object("64,192,1000,1,0,0:0:0:0:")
+    assert note.time_ms == 1000
+    assert note.col == 0
+
+
+def test_parse_hit_object_alt_x_layout() -> None:
+    note = parse_hit_object("256,192,12055,1,0,1:0:1:20:")
+    assert note is not None
+    assert note.time_ms == 12055
+    assert note.col == 2
+
+
+def test_parse_beatmap_alt_x_layout() -> None:
+    path = RAW / "2358613" / "hkmori - panic attack in bed (D_bobr) [normal].osu"
+    if not path.exists():
+        pytest.skip("dataset not present")
+    bm = parse_beatmap(path)
+    assert bm.note_count > 400
+    assert len(bm.notes) == bm.note_count
+
+
+def test_parse_hit_object_duplicate_same_lane_is_deduped() -> None:
+    notes = _parse_notes(
+        [
+            "64,192,116630,1,0,0:0:0:0:",
+            "64,192,116630,1,0,0:0:0:0:",
+        ]
+    )
+    assert len(notes) == 1
+    assert notes[0].col == 0
+
+
+def test_duplicate_hitobject_chart_round_trips() -> None:
+    from audio2map.osu.round_trip import round_trip_beatmap
+
+    path = RAW / "2452954" / "EBIMAYO - NIGHTMARE INVITATION (Lleethenoob) [S K Y Y - ADVANCED].osu"
+    if not path.exists():
+        pytest.skip("dataset not present")
+    bm = parse_beatmap(path)
+    assert bm.note_count == 1088
+    assert round_trip_beatmap(bm)
+
+
+def test_hold_ratio_matches_analyzer_ln_on_offset_x_chart() -> None:
+    from audio2map.data.chart_stats import hold_ratio
+    from audio2map.pattern_analyser import analyze_osu
+
+    path = RAW / "936195" / "tatatat - Melody of Promise (tatatat) [4K Beginner].osu"
+    if not path.exists():
+        pytest.skip("dataset not present")
+    bm = parse_beatmap(path)
+    pat = analyze_osu(path)
+    assert pat.analyzer_available
+    assert hold_ratio(bm) == pat.ln_percent
+    assert bm.note_count == 91

@@ -27,13 +27,14 @@ class ChartDecodeState:
 
     vocab: dict[str, int] = field(default_factory=build_vocab)
     id_to_token: dict[int, str] = field(default_factory=dict)
-    window_bars: int = 8
+    window_bars: int = 16
     bars_done: int = 0
     in_bar: bool = False
     last_pos: int | None = None
     expect_row: bool = False
     active_hold: list[bool] = field(default_factory=lambda: [False, False, False, False])
     finished: bool = False
+    force_next_bar: bool = False
     _event_row_ids: set[int] = field(default_factory=set)
     _pos_ids: list[int] = field(default_factory=list)
     _bar_id: int = 0
@@ -61,9 +62,16 @@ class ChartDecodeState:
         state.active_hold = active_hold_from_initial_row(initial_row)
         return state
 
+    def require_bar_after_prompt(self) -> None:
+        """Next sampled token must be ``<BAR>`` (start keep region after overlap context)."""
+        self.force_next_bar = True
+
     def allowed_token_ids(self) -> set[int]:
         if self.finished:
             return set()
+
+        if self.force_next_bar:
+            return {self._bar_id}
 
         allowed: set[int] = set()
         if not self.in_bar:
@@ -96,6 +104,7 @@ class ChartDecodeState:
             self.finished = True
             return
         if tok == TOKEN_BAR:
+            self.force_next_bar = False
             if self.in_bar:
                 self.bars_done += 1
             self.in_bar = True

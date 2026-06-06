@@ -95,8 +95,6 @@ def _eval_window_tokens_only(paths: list[Path], *, seed: int) -> AggregateStats:
         y, sr = load_mono_audio(find_audio_file(path.parent))
         audio_start, audio_end = audio_bar_range_from_duration(audio_duration_ms(y, sr), timing)
         sampled = sample_window_bars(
-            chart_start_bar=chart_start,
-            chart_end_bar=chart_end,
             audio_start_bar=audio_start,
             audio_end_bar=audio_end,
             cfg=cfg,
@@ -283,7 +281,7 @@ def eval_generate_window(
         path,
         start_bar=start_bar,
         build_grid_if_missing=build_grid_if_missing,
-        chart_meta=compute_chart_meta(path, skip_msd=True),
+        chart_meta=compute_chart_meta(path),
     )
     if sample is None:
         raise RuntimeError(f"cannot build sample for {path}")

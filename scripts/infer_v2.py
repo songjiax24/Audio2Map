@@ -16,27 +16,42 @@ from audio2map.eval.degeneracy import analyze_chart_degeneracy
 from audio2map.osu.export import export_beatmap_notes
 from audio2map.osu.parser import parse_beatmap
 from audio2map.osu.row_tokens import CanonicalTiming
+from audio2map.training.config import MAX_DECODER_LEN
 from audio2map.training.inference import (
     GenerationRangeConfig,
     OverlapConfig,
     generate_chart_notes,
 )
 from audio2map.training.model import load_checkpoint
+from audio2map.utils.paths import audio_grid_dir
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Infer v2 chart and export .osu")
     p.add_argument("--osu", type=str, required=True, help="template .osu (timing/metadata source)")
     p.add_argument("--checkpoint", type=str, required=True)
+    p.add_argument(
+        "--grid-dir",
+        type=str,
+        default=None,
+        help="audio_grid cache dir (must match training; default: processed_v2/audio_grid)",
+    )
     p.add_argument("--out", type=str, default=None, help="output .osu path")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--top-k", type=int, default=50)
     p.add_argument("--greedy", action="store_true", help="temperature=0 greedy (debug only)")
-    p.add_argument("--window-bars", type=int, default=8)
-    p.add_argument("--context-bars", type=int, default=4)
+    p.add_argument("--window-bars", type=int, default=16)
+    p.add_argument("--context-bars", type=int, default=8)
     p.add_argument("--keep-bars", type=int, default=4)
+    p.add_argument("--future-bars", type=int, default=4)
+    p.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=MAX_DECODER_LEN,
+        help="max decoder tokens per window (default: training MAX_DECODER_LEN)",
+    )
     p.add_argument(
         "--range-mode",
         choices=("audio_full", "reference_chart"),
@@ -60,15 +75,21 @@ def main() -> None:
 
     beatmap = parse_beatmap(osu_path)
     timing = CanonicalTiming.from_beatmap(beatmap)
-    meta = compute_chart_meta(osu_path, skip_msd=True)
+    meta = compute_chart_meta(osu_path)
     cond = build_cond_vec(meta)
 
     model = load_checkpoint(Path(args.checkpoint), device)
+    if args.context_bars + args.keep_bars + args.future_bars != args.window_bars:
+        raise SystemExit(
+            "context_bars + keep_bars + future_bars must equal window_bars "
+            f"({args.context_bars}+{args.keep_bars}+{args.future_bars}!={args.window_bars})"
+        )
     overlap = OverlapConfig(
         window_bars=args.window_bars,
         context_bars=args.context_bars,
         keep_bars=args.keep_bars,
-        future_bars=args.window_bars - args.context_bars - args.keep_bars,
+        future_bars=args.future_bars,
+        max_seq_len=args.max_seq_len,
     )
     range_cfg = GenerationRangeConfig(
         mode=args.range_mode,
@@ -76,11 +97,14 @@ def main() -> None:
     )
     temperature = 0.0 if args.greedy else args.temperature
 
+    grid_dir = Path(args.grid_dir) if args.grid_dir else audio_grid_dir()
+
     notes, report = generate_chart_notes(
         model,
         audio_path=osu_path,
         timing=timing,
         cond_vec=cond,
+        grid_dir=grid_dir,
         overlap=overlap,
         range_cfg=range_cfg,
         device=device,
@@ -99,6 +123,7 @@ def main() -> None:
         "output": str(out_path),
         "note_count": len(notes),
         "checkpoint": args.checkpoint,
+        "grid_dir": str(grid_dir),
         "architecture": getattr(model, "architecture", "unknown"),
         "audio_pooling": getattr(model, "audio_pooling", "unknown"),
         "generation": report.to_dict(),

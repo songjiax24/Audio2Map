@@ -32,7 +32,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Analyze Phase 1 v2 dataset")
     p.add_argument("--root", type=Path, default=raw_dir())
     p.add_argument("--limit", type=int, default=None)
-    p.add_argument("--window-bars", type=int, default=8)
+    p.add_argument("--window-bars", type=int, default=16)
     args = p.parse_args()
 
     paths = sorted(args.root.rglob("*.osu"))
@@ -116,6 +116,7 @@ def main() -> None:
     print(f"  removed: variable meter      {removed[FilterReason.VARIABLE_METER.value]:>6}")
     print(f"  removed: meter != {REQUIRED_METER}            {removed[FilterReason.METER_NOT_4.value]:>6}  <--")
     print(f"  removed: no timing           {removed[FilterReason.NO_TIMING.value]:>6}")
+    print(f"  removed: no notes            {removed[FilterReason.NO_NOTES.value]:>6}")
 
     if meter_not_4_hist:
         print("\n  meter != 4 breakdown:")

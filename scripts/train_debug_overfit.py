@@ -30,18 +30,6 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--out", type=str, default=None, help="save final checkpoint .pt")
-    p.add_argument(
-        "--architecture",
-        choices=("enc_dec", "prefix_lm"),
-        default="enc_dec",
-        help="enc_dec=formal encoder-decoder; prefix_lm=legacy ablation only",
-    )
-    p.add_argument(
-        "--audio-pooling",
-        choices=("tick", "bar"),
-        default="tick",
-        help="prefix_lm ablation only",
-    )
     args = p.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -67,11 +55,9 @@ def main() -> None:
     )
 
     model = build_model(
-        architecture=args.architecture,
         d_model=args.d_model,
         n_heads=args.heads,
         layers=args.layers,
-        audio_pooling=args.audio_pooling,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 

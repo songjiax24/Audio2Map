@@ -1,33 +1,58 @@
-"""Per-tick audio features aligned to the canonical BPM grid (v2).
+"""Per-tick log-mel features aligned to the canonical BPM grid (v2).
 
-**Active spec (v1):** matches ``processed_v2/audio_grid/`` precompute (3567 grids).
+**Active spec (v3):**
 
-- Dynamic hop ≈ ``tick_ms / 4``
-- Frame → tick via ``floor((frame_ms - offset) / tick_ms)``
-- All channels pooled with **mean** (including onset)
+- log-mel only, ``n_mels=128``
+- ``n_fft=1024``, ``hop_length=128`` @ 22.05 kHz (~5.80 ms/frame)
+- STFT frames linearly interpolated onto tick starts (note onset time):
+  ``tick_start_ms = offset_ms + tick * tick_ms``
 
-**Deferred (v2):** hop=512, tick-centered window, onset=max — see V2_MASTER_SPEC.md §7.
-Do not switch until small-sample comparison + selective precompute.
+Legacy grids on disk may use older specs (142-d mean-pool, etc.).
 """
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 
 V2_SAMPLE_RATE = 22_050
+V2_N_FFT = 1024
+V2_HOP_LENGTH = 128
 V2_N_MELS = 128
-V2_N_CHROMA = 12
-V2_FEATURE_DIM = V2_N_MELS + 1 + 1 + V2_N_CHROMA  # mel + onset + rms + chroma
+V2_FEATURE_DIM = V2_N_MELS
 
-# Grids on disk were built with v1; bump only after re-precompute with v2 pipeline.
-AUDIO_FEATURE_SPEC_VERSION = 1
+# ``power_to_db(..., ref=np.max)`` floor for out-of-grid padding (not 0 dB / song peak).
+V2_LOG_MEL_FLOOR_DB = -80.0
+
+AUDIO_FEATURE_SPEC_VERSION = 3
 
 
-def _frame_hop_ms(tick_ms: float) -> float:
-    """Fine-enough hop for pooling into tick bins (~4 frames per tick)."""
-    return max(tick_ms / 4.0, 1.0)
+def frame_hop_ms(*, sample_rate: int = V2_SAMPLE_RATE, hop_length: int = V2_HOP_LENGTH) -> float:
+    """Milliseconds between consecutive STFT frames."""
+    return hop_length * 1000.0 / float(sample_rate)
+
+
+def tick_start_ms(tick: int | np.ndarray, *, offset_ms: float, tick_ms: float) -> np.ndarray:
+    """Return tick-start time(s) in milliseconds (note placement time on the grid)."""
+    ticks = np.asarray(tick, dtype=np.float64)
+    return offset_ms + ticks * tick_ms
+
+
+def align_log_mel_to_ticks(
+    log_mel: np.ndarray,
+    tick_times_ms: np.ndarray,
+    *,
+    hop_ms: float,
+) -> np.ndarray:
+    """Map STFT log-mel frames onto tick-start times via linear interpolation."""
+    n_frames = log_mel.shape[0]
+    if n_frames == 0:
+        return np.zeros((len(tick_times_ms), log_mel.shape[1]), dtype=np.float32)
+
+    frame_times_ms = np.arange(n_frames, dtype=np.float64) * hop_ms
+    out = np.empty((len(tick_times_ms), log_mel.shape[1]), dtype=np.float32)
+    for band in range(log_mel.shape[1]):
+        out[:, band] = np.interp(tick_times_ms, frame_times_ms, log_mel[:, band])
+    return out
 
 
 def compute_tick_grid_features(
@@ -38,51 +63,30 @@ def compute_tick_grid_features(
     tick_ms: float,
     tick_min: int,
     tick_max: int,
+    n_fft: int = V2_N_FFT,
+    hop_length: int = V2_HOP_LENGTH,
 ) -> np.ndarray:
-    """Return ``(tick_max - tick_min, V2_FEATURE_DIM)`` float32 features (spec v1)."""
+    """Return ``(tick_max - tick_min, V2_N_MELS)`` float32 log-mel features."""
     import librosa
 
     if tick_max <= tick_min:
         return np.zeros((0, V2_FEATURE_DIM), dtype=np.float32)
 
-    hop_ms = _frame_hop_ms(tick_ms)
-    hop = max(1, int(round(sample_rate * hop_ms / 1000.0)))
-    n_fft = 2048
+    hop_ms = frame_hop_ms(sample_rate=sample_rate, hop_length=hop_length)
 
     mel = librosa.feature.melspectrogram(
         y=y,
         sr=sample_rate,
         n_fft=n_fft,
-        hop_length=hop,
+        hop_length=hop_length,
         n_mels=V2_N_MELS,
         fmin=20.0,
     )
-    log_mel = librosa.power_to_db(mel, ref=np.max).T.astype(np.float32)
+    log_mel = librosa.power_to_db(mel, ref=np.max).T.astype(np.float64)
 
-    rms = librosa.feature.rms(y=y, frame_length=n_fft, hop_length=hop)[0].astype(np.float32)
-    chroma = librosa.feature.chroma_stft(
-        y=y, sr=sample_rate, n_fft=n_fft, hop_length=hop
-    ).T.astype(np.float32)
-    onset = librosa.onset.onset_strength(y=y, sr=sample_rate, hop_length=hop).astype(np.float32)
-
-    n_frames = log_mel.shape[0]
-    num_ticks = tick_max - tick_min
-    acc = np.zeros((num_ticks, V2_FEATURE_DIM), dtype=np.float64)
-    counts = np.zeros(num_ticks, dtype=np.float64)
-
-    for frame_idx in range(n_frames):
-        frame_ms = frame_idx * hop_ms
-        tick = math.floor((frame_ms - offset_ms) / tick_ms)
-        if tick < tick_min or tick >= tick_max:
-            continue
-        row_idx = tick - tick_min
-        acc[row_idx, :V2_N_MELS] += log_mel[frame_idx]
-        acc[row_idx, V2_N_MELS] += float(onset[frame_idx]) if frame_idx < len(onset) else 0.0
-        acc[row_idx, V2_N_MELS + 1] += float(rms[frame_idx]) if frame_idx < len(rms) else 0.0
-        acc[row_idx, V2_N_MELS + 2 :] += chroma[frame_idx]
-        counts[row_idx] += 1.0
-
-    out = np.zeros((num_ticks, V2_FEATURE_DIM), dtype=np.float32)
-    valid = counts > 0
-    out[valid] = (acc[valid] / counts[valid, None]).astype(np.float32)
-    return out
+    tick_times_ms = tick_start_ms(
+        np.arange(tick_min, tick_max, dtype=np.float64),
+        offset_ms=offset_ms,
+        tick_ms=tick_ms,
+    )
+    return align_log_mel_to_ticks(log_mel, tick_times_ms, hop_ms=hop_ms)

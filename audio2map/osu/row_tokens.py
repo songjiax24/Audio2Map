@@ -39,6 +39,9 @@ TOKEN_BAR = "<BAR>"
 TOKEN_POS_PREFIX = "<POS_"
 TOKEN_ROW_PREFIX = "<ROW_"
 
+# Bump when token grammar / vocab construction changes (checkpoint metadata).
+TOKENIZER_VERSION = 1
+
 REAL_EVENT_STATES = frozenset({1, 2, 4})
 INITIAL_LANE_STATES = frozenset({0, 3})
 
@@ -344,8 +347,8 @@ def is_legal_row(row: RowState, active_hold: list[bool], *, allow_initial: bool 
     if not is_event_row(row):
         return False
     for lane, state in enumerate(row):
-        if state == LaneState.EMPTY:
-            continue
+        if state == LaneState.EMPTY and active_hold[lane]:
+            return False
         if state == LaneState.TAP and active_hold[lane]:
             return False
         if state == LaneState.HOLD_START and active_hold[lane]:

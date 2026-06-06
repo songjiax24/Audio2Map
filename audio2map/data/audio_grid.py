@@ -10,7 +10,15 @@ from pathlib import Path
 import numpy as np
 
 from audio2map.audio.loader import audio_duration_ms, find_audio_file, load_mono_audio
-from audio2map.audio.tick_features import V2_FEATURE_DIM, V2_SAMPLE_RATE, compute_tick_grid_features
+from audio2map.audio.tick_features import (
+    AUDIO_FEATURE_SPEC_VERSION,
+    V2_FEATURE_DIM,
+    V2_HOP_LENGTH,
+    V2_LOG_MEL_FLOOR_DB,
+    V2_N_FFT,
+    V2_SAMPLE_RATE,
+    compute_tick_grid_features,
+)
 from audio2map.osu.grid_config import TICKS_PER_BAR, TICKS_PER_BEAT
 from audio2map.osu.row_tokens import CanonicalTiming
 from audio2map.osu.tick_range import audio_grid_cache_stem, audio_tick_range_ms
@@ -28,6 +36,9 @@ class AudioGridMeta:
     audio_hash: str
     audio_path: str
     duration_ms: int
+    feature_spec_version: int = AUDIO_FEATURE_SPEC_VERSION
+    n_fft: int = V2_N_FFT
+    hop_length: int = V2_HOP_LENGTH
 
     @property
     def num_ticks(self) -> int:
@@ -38,7 +49,15 @@ class AudioGridMeta:
 
     @classmethod
     def from_dict(cls, data: dict) -> AudioGridMeta:
-        return cls(**data)
+        fields = {f.name for f in cls.__dataclass_fields__.values()}
+        kwargs = {k: v for k, v in data.items() if k in fields}
+        if "feature_spec_version" not in kwargs:
+            kwargs["feature_spec_version"] = 1
+        if "n_fft" not in kwargs:
+            kwargs["n_fft"] = 2048
+        if "hop_length" not in kwargs:
+            kwargs["hop_length"] = 0
+        return cls(**kwargs)
 
 
 def audio_content_hash(path: Path, *, chunk_bytes: int = 1 << 20) -> str:
@@ -72,6 +91,10 @@ def is_valid_audio_grid_cache(npy_path: Path, json_path: Path) -> bool:
         meta = AudioGridMeta.from_dict(json.loads(json_path.read_text(encoding="utf-8")))
         features = np.load(npy_path)
     except Exception:
+        return False
+    if meta.feature_spec_version != AUDIO_FEATURE_SPEC_VERSION:
+        return False
+    if meta.feature_dim != V2_FEATURE_DIM:
         return False
     return features.shape == expected_grid_shape(meta) and features.dtype == np.float32
 
@@ -125,6 +148,9 @@ def compute_audio_grid(
         audio_hash=audio_content_hash(audio_path),
         audio_path=str(audio_path),
         duration_ms=duration_ms,
+        feature_spec_version=AUDIO_FEATURE_SPEC_VERSION,
+        n_fft=V2_N_FFT,
+        hop_length=V2_HOP_LENGTH,
     )
     return features, meta
 
@@ -202,9 +228,9 @@ def slice_audio_window(
     window_start_bar: int,
     window_end_bar: int,
     *,
-    padding_value: float = 0.0,
+    padding_value: float = V2_LOG_MEL_FLOOR_DB,
 ) -> tuple[np.ndarray, dict[str, int]]:
-    """Slice ``[window_start_bar, window_end_bar)`` with zero padding outside grid."""
+    """Slice ``[window_start_bar, window_end_bar)``; out-of-grid ticks use log-mel floor."""
     window_start_tick = window_start_bar * TICKS_PER_BAR
     window_end_tick = window_end_bar * TICKS_PER_BAR
     length = window_end_tick - window_start_tick
