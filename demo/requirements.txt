@@ -1,0 +1,8 @@
+# Demo deps are defined in pyproject.toml [project.optional-dependencies.demo].
+# Install with uv from the repository root:
+#
+#   uv pip install -e ".[train,demo]"
+#
+# Or in one line without activating a venv:
+#
+#   uv run --extra train --extra demo uvicorn demo.backend.app:app --host 0.0.0.0 --port 8000

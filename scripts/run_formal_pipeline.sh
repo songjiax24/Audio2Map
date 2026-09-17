@@ -2,9 +2,13 @@
 # Full formal pipeline: chart meta → v3 audio grid → audit → train.
 set -euo pipefail
 
-ROOT="/root/audio2map"
-DATA="/root/autodl-tmp/audio2map_data"
-LOG_DIR="$DATA/processed_v2/logs"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -z "${AUDIO2MAP_DATA_ROOT:-}" ]]; then
+  echo "Set AUDIO2MAP_DATA_ROOT to your data disk (raw/, processed/, chart_meta/)." >&2
+  exit 1
+fi
+DATA="$AUDIO2MAP_DATA_ROOT"
+LOG_DIR="$DATA/processed/logs"
 TS="$(date +%Y%m%d_%H%M%S)"
 PIPE_LOG="$LOG_DIR/formal_pipeline_${TS}.log"
 META_LOG="$LOG_DIR/compute_chart_meta_${TS}.log"
@@ -19,32 +23,32 @@ exec > >(tee -a "$PIPE_LOG") 2>&1
 echo "============================================================"
 echo "audio2map formal pipeline started at $(date -Is)"
 echo "master log: $PIPE_LOG"
-echo "disk: $(df -h /root/autodl-tmp | tail -1)"
+echo "disk: $(df -h "$DATA" 2>/dev/null | tail -1)"
 echo "============================================================"
 
 echo
 echo "[1/4] compute chart meta manifest (eligible charts, fresh write)"
 echo "  log: $META_LOG"
-.venv/bin/python -u scripts/compute_chart_meta.py --eligible-only 2>&1 | tee "$META_LOG"
+.venv/bin/python -u -m audio2map.cli.meta --eligible-only 2>&1 | tee "$META_LOG"
 META_LINES="$(wc -l < "$DATA/chart_meta/manifest.jsonl")"
 echo "  manifest lines: $META_LINES"
 
 echo
 echo "[2/4] precompute audio grid v3 (128-d, --no-skip-existing)"
 echo "  log: $GRID_LOG"
-.venv/bin/python -u scripts/precompute_audio_grid.py --no-skip-existing 2>&1 | tee "$GRID_LOG"
+.venv/bin/python -u -m audio2map.cli.grid precompute --no-skip-existing 2>&1 | tee "$GRID_LOG"
 
 echo
 echo "[3/4] audit audio grid"
-.venv/bin/python scripts/audit_audio_grid.py --fix || true
-.venv/bin/python scripts/audit_audio_grid.py
+.venv/bin/python -m audio2map.cli.grid audit --fix || true
+.venv/bin/python -m audio2map.cli.grid audit
 
 echo
 echo "[4/4] formal training (200k steps, batch=16)"
 echo "  log: $TRAIN_LOG"
-.venv/bin/python -u scripts/train_v2.py \
+.venv/bin/python -u -m audio2map.cli.train \
   --d-model 512 \
-  --n-heads 8 \
+  --heads 8 \
   --encoder-layers 4 \
   --decoder-layers 6 \
   --max-decoder-len 2048 \
@@ -66,5 +70,5 @@ echo "  log: $TRAIN_LOG"
 echo
 echo "============================================================"
 echo "pipeline finished at $(date -Is)"
-echo "checkpoints: $DATA/processed_v2/checkpoints/formal_enc_dec_v3/"
+echo "checkpoints: $DATA/processed/checkpoints/formal_enc_dec_v3/"
 echo "============================================================"

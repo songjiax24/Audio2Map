@@ -1,4 +1,5 @@
-# v2 training / preprocessing defaults (see docs/v2_spec.md)
+# v2 inference overlap defaults — loaded via: audio2map-infer --config configs/data/v2.yaml
+# (sample_rate / feature_dim are informational; they are fixed in features/audio/tick_features.py)
 
 sample_rate: 22050
 feature_dim: 128

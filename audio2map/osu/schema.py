@@ -14,7 +14,7 @@ class NoteType(Enum):
 
 @dataclass(frozen=True, slots=True)
 class ManiaNote:
-    """Single mania key event at ``time_ms`` in column ``col`` (0–3 for 4K)."""
+    """Single mania key event at ``time_ms`` in column ``col`` (0-3 for 4K)."""
 
     time_ms: int
     col: int
@@ -23,7 +23,7 @@ class ManiaNote:
 
     def __post_init__(self) -> None:
         if self.col < 0 or self.col > 3:
-            raise ValueError(f"4K column must be 0–3, got {self.col}")
+            raise ValueError(f"4K column must be 0-3, got {self.col}")
         if self.note_type == NoteType.HOLD:
             if self.end_time_ms is None:
                 raise ValueError("hold notes require end_time_ms")
@@ -51,12 +51,6 @@ class ChartMetadata:
     version: str
     beatmap_id: int | None
     beatmap_set_id: int | None
-    hp: float
-    circle_size: float
-    overall_difficulty: float
-    approach_rate: float
-    slider_multiplier: float
-    audio_filename: str
 
 
 @dataclass(slots=True)
@@ -65,15 +59,6 @@ class Beatmap:
     metadata: ChartMetadata
     timing_points: list[TimingPoint] = field(default_factory=list)
     notes: list[ManiaNote] = field(default_factory=list)
-
-    @property
-    def duration_ms(self) -> int:
-        if not self.notes:
-            return 0
-        last = max(
-            n.end_time_ms if n.note_type == NoteType.HOLD else n.time_ms for n in self.notes
-        )
-        return last
 
     @property
     def note_count(self) -> int:

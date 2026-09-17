@@ -12,12 +12,12 @@ import sys
 import zipfile
 from pathlib import Path
 
-from audio2map.audio.loader import find_audio_file
-from audio2map.utils.paths import processed_v2_dir
+from audio2map.osu.parser import chart_audio_path
+from audio2map.utils.paths import processed_dir
 
 
 def pack_compare_osz(original_osu: Path, generated_osu: Path, out_osz: Path) -> None:
-    audio = find_audio_file(original_osu.parent)
+    audio = chart_audio_path(original_osu)
     out_osz.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_osz, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(original_osu, original_osu.name)
@@ -42,9 +42,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger("batch_pack_osz")
 
-    out_dir = Path(args.out_dir) if args.out_dir else processed_v2_dir() / "generated" / "compare_batch"
+    out_dir = Path(args.out_dir) if args.out_dir else processed_dir() / "generated" / "compare_batch"
     out_dir.mkdir(parents=True, exist_ok=True)
-    infer_script = Path(__file__).resolve().parent / "infer_v2.py"
     results: list[dict] = []
 
     for osu in args.osu:
@@ -62,7 +61,8 @@ def main() -> None:
         log.info("infer %s", osu_path.name)
         cmd = [
             sys.executable,
-            str(infer_script),
+            "-m",
+            "audio2map.cli.infer",
             "--checkpoint",
             args.checkpoint,
             "--osu",

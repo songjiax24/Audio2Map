@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Debug overfit: memorize a single (or few) v2 chart windows."""
+"""Debug overfit: memorize a single (or few) chart windows."""
 
 from __future__ import annotations
 
@@ -12,12 +12,13 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from audio2map.training.dataset import Audio2MapV2Dataset, DatasetConfig
-from audio2map.training.model import build_model
+from audio2map.model.model import build_model
+from audio2map.train.data import AudioChartDataset, pad_batch
+from audio2map.train.step import training_step
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Debug overfit one v2 chart window")
+    p = argparse.ArgumentParser(description="Debug overfit one chart window")
     p.add_argument("--osu", type=str, required=True, help="path to one eligible .osu")
     p.add_argument("--start-bar", type=int, default=None, help="fixed window start bar")
     p.add_argument("--steps", type=int, default=500)
@@ -41,9 +42,10 @@ def main() -> None:
     if not osu_path.is_file():
         raise SystemExit(f"not found: {osu_path}")
 
-    ds = Audio2MapV2Dataset(
+    ds = AudioChartDataset(
         [osu_path],
-        cfg=DatasetConfig(samples_per_chart=max(1, args.batch_size), build_grid_if_missing=True),
+        samples_per_chart=max(1, args.batch_size),
+        build_grid_if_missing=True,
         seed=args.seed,
         fixed_start_bar=args.start_bar,
     )
@@ -51,13 +53,14 @@ def main() -> None:
         ds,
         batch_size=args.batch_size,
         shuffle=True,
-        collate_fn=Audio2MapV2Dataset.collate_fn,
+        collate_fn=pad_batch,
     )
 
     model = build_model(
         d_model=args.d_model,
         n_heads=args.heads,
-        layers=args.layers,
+        encoder_layers=args.layers,
+        decoder_layers=args.layers,
     ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
@@ -75,7 +78,7 @@ def main() -> None:
     stats: dict[str, float] = {}
     while step < args.steps:
         opt.zero_grad(set_to_none=True)
-        loss, metrics = model.training_step(batch)
+        loss, metrics = training_step(model, batch)
         loss.backward()
         opt.step()
         stats = metrics

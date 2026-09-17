@@ -20,6 +20,14 @@ venv/
 .vscode/
 *.swp
 
+# Node
+**/node_modules/
+
+# Local runtime assets (optional demo copies — never commit)
+chart_meta/
+checkpoint/
+.local-data/
+
 # Data & artifacts (live on data disk, never commit)
 *.mp3
 *.ogg
@@ -33,7 +41,7 @@ venv/
 # Logs & runtime state
 *.log
 
-# ML artifacts (future)
+# ML artifacts
 *.pt
 *.pth
 *.ckpt

@@ -7,10 +7,11 @@ name = "audio2map"
 version = "0.1.0"
 description = "Generate osu!mania 4K charts from audio and global conditions"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
-    "librosa>=0.10.0",
+    "librosa>=1.0.0",
     "numpy>=1.24.0",
+    "pyyaml>=6.0",
     "requests>=2.28.0",
     "rosu-pp-py>=4.0.0",
     "soundfile>=0.12.0",
@@ -19,15 +20,26 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "import-linter>=2.0",
     "pytest>=7.0",
     "ruff>=0.4",
 ]
 train = [
     "torch>=2.1",
 ]
+demo = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.0.0",
+]
 
 [project.scripts]
-audio2map-collect = "audio2map.data.collector.cli:main"
+audio2map-meta = "audio2map.cli.meta:main"
+audio2map-grid = "audio2map.cli.grid:main"
+audio2map-train = "audio2map.cli.train:main"
+audio2map-eval = "audio2map.cli.eval:main"
+audio2map-infer = "audio2map.cli.infer:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -35,12 +47,48 @@ include = ["audio2map*"]
 
 [tool.setuptools.package-data]
 audio2map = [
-    "third_party/ett/official_minacalc_runner",
-    "third_party/ett/README.md",
-    "pattern_analyser/config_defaults.json",
-    "pattern_analyser/README.md",
+    "features/cond/ett/libminacalc.so",
+    "features/cond/ett/README.md",
+    "features/cond/ett/build.sh",
+    "features/cond/pattern_analyser/config_defaults.json",
+    "features/cond/pattern_analyser/README.md",
 ]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
+
+[tool.ruff.lint]
+# Critical only for now (undefined names / syntax). Unused-import F401 later.
+select = ["E9", "F821", "F822", "F823"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "requires_data: needs AUDIO2MAP_DATA_ROOT with raw/ beatmaps (or specific fixtures)",
+]
+addopts = "-q"
+
+[tool.importlinter]
+root_package = "audio2map"
+
+# One-directional layering: each layer may only import the layers below it.
+# Verified edges: dataset→model.config (constants home).
+# Vendored MinaCalc / pattern_analyser live under features.cond.
+[[tool.importlinter.contracts]]
+name = "Layered packages (high → low)"
+type = "layers"
+layers = [
+    "audio2map.cli",
+    "audio2map.eval",
+    "audio2map.train",
+    "audio2map.generate",
+    "audio2map.dataset",
+    "audio2map.model",
+    "audio2map.features",
+    "audio2map.tokens",
+    "audio2map.grid",
+    "audio2map.osu",
+    "audio2map.utils",
+]

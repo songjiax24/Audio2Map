@@ -1,17 +1,25 @@
-# Formal multi-chart training (reference — copy to CLI; not loaded automatically)
+# Formal multi-chart training — loaded via: audio2map-train --config configs/train/train_multi.yaml
 
-# Default checkpoint dir: processed_v2/checkpoints/train_v1/
+# Default checkpoint dir: processed/checkpoints/formal_enc_dec_v3/
 
-steps: 50000
-batch_size: 8
-samples_per_chart: 2
-lr: 0.0003
-d_model: 256
-n_layers: 4
-n_heads: 4
+max_steps: 200000
+batch_size: 16
+samples_per_chart: 4
+lr: 0.0002
+warmup_steps: 2000
+weight_decay: 0.01
+d_model: 512
+encoder_layers: 4
+decoder_layers: 6
+heads: 8
+dropout: 0.1
 log_every: 50
-save_every: 1000
-require_grid: true
+save_every: 2000
+precision: bf16
+# must equal WINDOW_BARS; not a training flag
+window_bars: 16
+# audio: 128-d log-mel, feature spec v3
+# cond_vec: 18-d
 
 # Example (all defaults):
-# python scripts/train_v2.py
+# audio2map-train --config configs/train/train_multi.yaml

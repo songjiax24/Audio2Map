@@ -1,0 +1,4 @@
+# Demo runtime artifacts
+outputs/
+uploads/
+.cache/

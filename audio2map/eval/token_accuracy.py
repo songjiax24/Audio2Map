@@ -1,20 +1,26 @@
-"""Split token accuracy by token type (BAR / POS / ROW / EOS)."""
+"""Split token accuracy by type (BAR / POS / ROW / EOS) and per-lane hold recall."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 
 import torch
 
-from audio2map.osu.row_tokens import (
+from audio2map.tokens import (
     TOKEN_BAR,
     TOKEN_BOS,
     TOKEN_EOS,
     TOKEN_PAD,
     TOKEN_POS_PREFIX,
     TOKEN_ROW_PREFIX,
-    invert_vocab,
+    LaneState,
+    RowState,
+    row_state_from_token,
 )
+
+
+def _ratio(num: int, den: int) -> float:
+    return num / den if den else 0.0
 
 
 @dataclass(slots=True)
@@ -37,63 +43,44 @@ class SplitTokenAccuracy:
     other_total: int = 0
 
     def merge(self, other: SplitTokenAccuracy) -> None:
-        for name in self.__dataclass_fields__:
-            setattr(self, name, getattr(self, name) + getattr(other, name))
+        for f in fields(self):
+            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
 
     def to_dict(self) -> dict:
-        def rate(c: int, t: int) -> float | None:
-            return c / t if t else None
-
         return {
-            "bar_acc": rate(self.bar_correct, self.bar_total),
-            "pos_acc": rate(self.pos_correct, self.pos_total),
-            "row_exact_acc": rate(self.row_correct, self.row_total),
-            "row_lane_acc": rate(self.row_lane_correct, self.row_lane_total),
-            "eos_acc": rate(self.eos_correct, self.eos_total),
-            "hold_start_recall": rate(self.hold_start_recall_num, self.hold_start_recall_den),
-            "hold_end_recall": rate(self.hold_end_recall_num, self.hold_end_recall_den),
-            "overall_acc": rate(
-                self.bar_correct
-                + self.pos_correct
-                + self.row_correct
-                + self.eos_correct
-                + self.other_correct,
-                self.bar_total
-                + self.pos_total
-                + self.row_total
-                + self.eos_total
-                + self.other_total,
-            ),
+            "bar_acc": _ratio(self.bar_correct, self.bar_total),
+            "pos_acc": _ratio(self.pos_correct, self.pos_total),
+            "row_exact_acc": _ratio(self.row_correct, self.row_total),
+            "row_lane_acc": _ratio(self.row_lane_correct, self.row_lane_total),
+            "eos_acc": _ratio(self.eos_correct, self.eos_total),
+            "hold_start_recall": _ratio(self.hold_start_recall_num, self.hold_start_recall_den),
+            "hold_end_recall": _ratio(self.hold_end_recall_num, self.hold_end_recall_den),
+            "other_acc": _ratio(self.other_correct, self.other_total),
         }
 
 
-def _row_lane_match(pred_tok: str, tgt_tok: str) -> bool:
-    if not (pred_tok.startswith(TOKEN_ROW_PREFIX) and tgt_tok.startswith(TOKEN_ROW_PREFIX)):
-        return False
-    return pred_tok == tgt_tok
+def _pred_row(tok: str) -> RowState | None:
+    try:
+        return row_state_from_token(tok)
+    except ValueError:
+        return None
 
 
-def _row_has_state(tok: str, digit: str) -> bool:
-    if not tok.startswith(TOKEN_ROW_PREFIX):
-        return False
-    body = tok[len(TOKEN_ROW_PREFIX) : -1]
-    return digit in body
-
-
-def accumulate_split_accuracy(
+def split_token_accuracy(
     pred_ids: torch.Tensor,
     target_ids: torch.Tensor,
     loss_mask: torch.Tensor,
     *,
-    id_to_token: dict[int, str] | None = None,
+    id_to_token: dict[int, str],
 ) -> SplitTokenAccuracy:
-    """Accumulate split accuracy for one batch row (1D tensors after [:,1:])."""
-    id_to_token = id_to_token or invert_vocab()
+    """Per-type accuracy for one sequence (1D tensors after ``[:, 1:]``)."""
     out = SplitTokenAccuracy()
     for p, t, m in zip(pred_ids.tolist(), target_ids.tolist(), loss_mask.tolist(), strict=True):
         if not m:
             continue
         pt, tt = id_to_token[int(p)], id_to_token[int(t)]
+        if tt in (TOKEN_BOS, TOKEN_PAD):
+            continue
         if tt == TOKEN_BAR:
             out.bar_total += 1
             out.bar_correct += int(pt == tt)
@@ -101,27 +88,25 @@ def accumulate_split_accuracy(
             out.pos_total += 1
             out.pos_correct += int(pt == tt)
         elif tt.startswith(TOKEN_ROW_PREFIX):
+            trow = row_state_from_token(tt)
+            prow = _pred_row(pt)
             out.row_total += 1
             out.row_correct += int(pt == tt)
             out.row_lane_total += 4
-            if _row_lane_match(pt, tt):
-                out.row_lane_correct += 4
-            else:
-                for i in range(4):
-                    if pt[i + len(TOKEN_ROW_PREFIX)] == tt[i + len(TOKEN_ROW_PREFIX)]:
-                        out.row_lane_correct += 1
-            if _row_has_state(tt, "2"):
-                out.hold_start_recall_den += 1
-                if _row_has_state(pt, "2"):
-                    out.hold_start_recall_num += 1
-            if _row_has_state(tt, "4"):
-                out.hold_end_recall_den += 1
-                if _row_has_state(pt, "4"):
-                    out.hold_end_recall_num += 1
+            for i, tlane in enumerate(trow):
+                plane = prow[i] if prow is not None else None
+                if plane == tlane:
+                    out.row_lane_correct += 1
+                if tlane == LaneState.HOLD_START:
+                    out.hold_start_recall_den += 1
+                    out.hold_start_recall_num += int(plane == LaneState.HOLD_START)
+                elif tlane == LaneState.HOLD_END:
+                    out.hold_end_recall_den += 1
+                    out.hold_end_recall_num += int(plane == LaneState.HOLD_END)
         elif tt == TOKEN_EOS:
             out.eos_total += 1
             out.eos_correct += int(pt == tt)
-        elif tt not in (TOKEN_BOS, TOKEN_PAD):
+        else:
             out.other_total += 1
             out.other_correct += int(pt == tt)
     return out

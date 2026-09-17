@@ -1,0 +1,6 @@
+# Vendored local toolchains (node/ffmpeg binaries)
+.tools/
+
+# Python
+__pycache__/
+*.py[cod]
