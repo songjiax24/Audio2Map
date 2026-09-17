@@ -27,7 +27,6 @@ from audio2map.generate.overlap import (
     OverlapConfig,
     generate_chart_notes,
 )
-from audio2map.generate.timing_estimate import estimate_bpm_offset
 from audio2map.grid import CanonicalTiming, canonicalize_bpm
 from audio2map.model.model import AudioChartModel
 from audio2map.osu.export import write_osu
@@ -44,7 +43,6 @@ __all__ = [
     "USER_COND_SOURCE_FIELDS",
     "build_final_cond_vec",
     "canonical_bpm_norm_from_bpm",
-    "estimate_bpm_offset",
     "generate_chart",
     "load_cond_candidates",
     "pack_osz",
@@ -64,7 +62,7 @@ def timing_from_osu(path: Path) -> CanonicalTiming:
 
 
 def timing_from_bpm_offset(*, bpm: float, offset_ms: float) -> CanonicalTiming:
-    """Canonical timing from explicit BPM/offset (demo manual or estimated)."""
+    """Canonical timing from explicit BPM/offset."""
     canonical_bpm, scale_exp = canonicalize_bpm(bpm)
     return CanonicalTiming(
         offset_ms=int(round(offset_ms)),

@@ -72,7 +72,7 @@ Open http://127.0.0.1:5173 — Vite proxies `/api` to the backend.
 
 1. Upload `.mp3` or `.wav` (kept as-is; not transcoded)
 2. Enter title / artist metadata
-3. Click **Estimate BPM / Offset**
+3. Enter BPM and offset
 4. Adjust **Style** sliders (star rating, pattern ratios, Etterna MSD). Defaults are star rating 0–10, MSD 0–40, analyzer 0–1; the tracks go to 15 / 60 / 1
 5. Click **Find matching charts** — picks one real library chart inside all ranges
 6. Click **Generate Beatmap** — a progress bar fills while inference runs, then download `.osu` / `.osz`
@@ -88,7 +88,7 @@ Each job is saved under `demo/backend/outputs/<job_id>/`:
 Artist - Title (Creator) [Difficulty].osu
 Artist - Title.osz
 request.json
-estimated_timing.json
+timing.json
 selected_condition.json
 final_cond_vec.json
 export_files.json
@@ -103,7 +103,6 @@ error.txt          # on failure
 - `GET /api/health`
 - `GET /api/cond-names`
 - `POST /api/upload`
-- `POST /api/estimate_timing`
 - `POST /api/select_condition`
 - `POST /api/generate`
 - `GET /api/jobs/{job_id}`

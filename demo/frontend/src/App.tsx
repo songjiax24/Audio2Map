@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from "react";
 import {
   checkHealth,
   downloadUrl,
-  estimateTiming,
   fetchCondNames,
   fetchJobStatus,
   generateBeatmap,
@@ -20,7 +19,6 @@ import {
 type Step =
   | "idle"
   | "uploading"
-  | "timing"
   | "condition"
   | "inference"
   | "export"
@@ -49,11 +47,9 @@ export default function App() {
   } | null>(null);
   const [conditionError, setConditionError] = useState("");
 
-  const [useAutoTiming, setUseAutoTiming] = useState(true);
   const [bpm, setBpm] = useState<number | "">("");
   const [offsetMs, setOffsetMs] = useState<number | "">("");
   const [canonicalBpmNorm, setCanonicalBpmNorm] = useState<number | "">("");
-  const [timingError, setTimingError] = useState("");
 
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState("");
@@ -121,44 +117,19 @@ export default function App() {
     }
   }, []);
 
-  const handleEstimateTiming = useCallback(async () => {
-    if (!fileId) {
-      setTimingError("Please upload an .mp3 or .wav file first.");
-      return;
-    }
-    setTimingError("");
-    setBusy(true);
-    setStep("timing");
-    try {
-      const res = await estimateTiming(fileId);
-      setBpm(Math.round(res.bpm * 100) / 100);
-      setOffsetMs(Math.round(res.offset_ms * 10) / 10);
-      setCanonicalBpmNorm(Math.round(res.canonical_bpm_norm * 10000) / 10000);
-      setUseAutoTiming(true);
-      setStep("idle");
-    } catch (err) {
-      setTimingError(
-        err instanceof Error
-          ? err.message
-          : "Could not estimate beats from the audio. Please enter BPM and offset manually.",
-      );
-      setStep("idle");
-    } finally {
-      setBusy(false);
-    }
-  }, [fileId]);
-
   useEffect(() => {
-    if (!useAutoTiming && typeof bpm === "number" && bpm > 0) {
+    if (typeof bpm === "number" && bpm > 0) {
       const { canonicalBpmNorm: n } = canonicalFromBpm(bpm);
       setCanonicalBpmNorm(Math.round(n * 10000) / 10000);
       setConditionResult(null);
+    } else {
+      setCanonicalBpmNorm("");
     }
-  }, [bpm, useAutoTiming]);
+  }, [bpm]);
 
   const handleSearchCondition = useCallback(async () => {
     if (canonicalBpmNorm === "") {
-      setConditionError("Estimate BPM first (or enter timing manually).");
+      setConditionError("Enter BPM first.");
       return;
     }
     setConditionError("");
@@ -192,7 +163,7 @@ export default function App() {
       return;
     }
     if (bpm === "" || offsetMs === "") {
-      setError("Please estimate or enter BPM and offset.");
+      setError("Please enter BPM and offset.");
       return;
     }
     if (!conditionResult?.finalCondVec) {
@@ -274,7 +245,6 @@ export default function App() {
 
   const steps: { key: Step; label: string }[] = [
     { key: "uploading", label: "Uploading audio" },
-    { key: "timing", label: "Estimating BPM and offset" },
     { key: "condition", label: "Finding a matching chart style" },
     { key: "inference", label: "Generating chart" },
     { key: "export", label: "Exporting .osu / .osz" },
@@ -346,30 +316,13 @@ export default function App() {
 
       <section className="card">
         <h2>Timing</h2>
-        <button type="button" onClick={handleEstimateTiming} disabled={busy || !fileId}>
-          Estimate BPM / Offset
-        </button>
-        {timingError && <div className="status error">{timingError}</div>}
-
-        <div className="checkbox-row">
-          <input
-            type="checkbox"
-            id="auto-timing"
-            checked={useAutoTiming}
-            onChange={(e) => setUseAutoTiming(e.target.checked)}
-          />
-          <label htmlFor="auto-timing" style={{ margin: 0 }}>
-            Use auto-estimated timing
-          </label>
-        </div>
-
         <div className="row-2">
           <label>
             BPM
             <input
               type="number"
+              step="any"
               value={bpm}
-              disabled={useAutoTiming}
               onChange={(e) => setBpm(e.target.value === "" ? "" : Number(e.target.value))}
             />
           </label>
@@ -377,18 +330,12 @@ export default function App() {
             Offset (ms)
             <input
               type="number"
+              step="any"
               value={offsetMs}
-              disabled={useAutoTiming}
               onChange={(e) => setOffsetMs(e.target.value === "" ? "" : Number(e.target.value))}
             />
           </label>
         </div>
-
-        {!useAutoTiming && (
-          <p style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
-            Edit BPM and offset above.
-          </p>
-        )}
       </section>
 
       <section className="card">

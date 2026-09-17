@@ -14,8 +14,6 @@ from demo.backend.config import get_checkpoint_path, get_manifest_path
 from demo.backend.inference_service import service
 from demo.backend.schemas import (
     ConditionRange,
-    EstimateTimingRequest,
-    EstimateTimingResponse,
     GenerateRequest,
     GenerateResponse,
     HealthResponse,
@@ -69,23 +67,6 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
     return UploadResponse(file_id=file_id, filename=file.filename)
-
-
-@app.post("/api/estimate_timing", response_model=EstimateTimingResponse)
-def estimate_timing(body: EstimateTimingRequest) -> EstimateTimingResponse:
-    try:
-        result = service.estimate_timing(body.file_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except (ValueError, RuntimeError) as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:
-        logging.exception("estimate_timing failed")
-        raise HTTPException(
-            422,
-            "Could not estimate beats from the audio. Please enter BPM and offset manually.",
-        ) from exc
-    return EstimateTimingResponse(**result)
 
 
 def _parse_condition_ranges(raw: dict[str, ConditionRange]) -> dict[str, tuple[float, float]]:

@@ -22,18 +22,6 @@ class UploadResponse(BaseModel):
     status: str = "uploaded"
 
 
-class EstimateTimingRequest(BaseModel):
-    file_id: str
-
-
-class EstimateTimingResponse(BaseModel):
-    bpm: float
-    offset_ms: float
-    canonical_bpm: float
-    canonical_bpm_norm: float
-    debug: dict[str, Any] = Field(default_factory=dict)
-
-
 class ConditionRange(BaseModel):
     min: float
     max: float
@@ -52,7 +40,7 @@ class SelectConditionResponse(BaseModel):
     selected_original_cond_vec: list[float]
     selected_source_values: dict[str, float]
     final_cond_vec: list[float]
-    canonical_bpm_norm_source: str = "uploaded_audio_estimated_bpm"
+    canonical_bpm_norm_source: str = "user_entered_bpm"
     selection_rule: str = "uniform_among_matches"
 
 

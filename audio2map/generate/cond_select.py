@@ -148,6 +148,6 @@ def select_condition(
             name: float(getattr(selected.meta, name)) for name in USER_COND_SOURCE_FIELDS
         },
         "final_cond_vec": final.tolist(),
-        "canonical_bpm_norm_source": "uploaded_audio_estimated_bpm",
+        "canonical_bpm_norm_source": "user_entered_bpm",
         "selection_rule": "uniform_among_matches",
     }

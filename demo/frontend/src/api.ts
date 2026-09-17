@@ -31,21 +31,6 @@ export async function uploadAudio(file: File): Promise<{ file_id: string; filena
   return res.json();
 }
 
-export async function estimateTiming(fileId: string): Promise<{
-  bpm: number;
-  offset_ms: number;
-  canonical_bpm: number;
-  canonical_bpm_norm: number;
-}> {
-  const res = await fetch(`${BASE}/estimate_timing`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_id: fileId }),
-  });
-  if (!res.ok) throw new Error(await parseError(res));
-  return res.json();
-}
-
 export async function selectCondition(
   ranges: Record<string, Range>,
   canonicalBpmNorm: number,

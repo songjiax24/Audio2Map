@@ -19,7 +19,6 @@ from audio2map.generate.overlap import GenerationRangeConfig, OverlapConfig
 from audio2map.generate.service import (
     DecodeConfig,
     canonical_bpm_norm_from_bpm,
-    estimate_bpm_offset,
     generate_chart,
     load_cond_candidates,
     select_condition,
@@ -112,21 +111,6 @@ class InferenceService:
             raise FileNotFoundError(f"No uploaded audio for file_id: {file_id}")
         return files[0]
 
-    def estimate_timing(self, file_id: str) -> dict[str, Any]:
-        audio_path = self._upload_path(file_id)
-        bpm, offset_ms, debug = estimate_bpm_offset(audio_path)
-        canonical_bpm, canonical_bpm_norm, scale_exp = canonical_bpm_norm_from_bpm(bpm)
-        debug.setdefault("canonical_bpm", canonical_bpm)
-        debug.setdefault("canonical_bpm_norm", canonical_bpm_norm)
-        debug.setdefault("bpm_scale_exp", scale_exp)
-        return {
-            "bpm": bpm,
-            "offset_ms": offset_ms,
-            "canonical_bpm": canonical_bpm,
-            "canonical_bpm_norm": canonical_bpm_norm,
-            "debug": debug,
-        }
-
     def select_condition_from_ranges(
         self,
         manifest_path: Path,
@@ -174,7 +158,7 @@ class InferenceService:
             self._write_json(job_dir / "selected_condition.json", condition_payload)
         canon_bpm, canon_norm, _ = canonical_bpm_norm_from_bpm(bpm)
         self._write_json(
-            job_dir / "estimated_timing.json",
+            job_dir / "timing.json",
             {
                 "bpm": bpm,
                 "offset_ms": offset_ms,
