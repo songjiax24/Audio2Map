@@ -11,23 +11,102 @@ from pathlib import Path
 import torch
 
 from audio2map.cli.common import parse_args_with_config, setup_logging
-from audio2map.dataset.filter import list_eligible_osu_paths
+from audio2map.dataset.bundle import filter_v0_paths
+from audio2map.dataset.split import (
+    GROUP_BY,
+    SPLIT_SCHEME,
+    SplitError,
+    SplitName,
+    default_split_manifest_path,
+    group_id_for_chart,
+    list_raw_osu_paths,
+    load_split_manifest,
+    split_group_chart_counts,
+    split_paths,
+)
 from audio2map.eval.chart_eval import eval_inference_chart, eval_teacher_forcing
 from audio2map.features.cond import build_cond_vec, compute_chart_meta
 from audio2map.generate.overlap import DecodeConfig, GenerationRangeConfig
+from audio2map.model.config import WINDOW_BARS
 from audio2map.model.model import load_checkpoint
+from audio2map.utils.paths import audio_grid_dir, raw_dir
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DECODE = DecodeConfig()
 
 
-def _pick_paths(limit: int | None, seed: int) -> list[Path]:
-    paths = list_eligible_osu_paths()
-    if limit is not None and limit < len(paths):
-        rng = random.Random(seed)
-        paths = rng.sample(paths, limit)
+def _teacher_paths(args: argparse.Namespace) -> list[Path]:
+    if args.osu:
+        path = Path(args.osu)
+        if not path.is_file():
+            raise SystemExit(f"osu file not found: {path}")
+        if args.split is None:
+            return [path]
+        try:
+            manifest, raw_root = _load_split(args)
+            group_id = group_id_for_chart(path, raw_root)
+            assigned = manifest.groups.get(group_id)
+        except SplitError as exc:
+            raise SystemExit(str(exc)) from exc
+        if assigned is None or assigned != args.split:
+            raise SystemExit(
+                f"{path} group {group_id} is split {assigned!r}, expected {args.split!r}"
+            )
+        return [path]
+
+    split_name: SplitName = args.split or "test"
+    try:
+        manifest, raw_root = _load_split(args)
+        raw_paths = list_raw_osu_paths(raw_root)
+        by_split = split_paths(raw_paths, manifest, raw_root=raw_root)
+    except SplitError as exc:
+        raise SystemExit(str(exc)) from exc
+    counts = split_group_chart_counts(manifest)
+    n_g, n_c = counts[split_name]
+    logger.info(
+        "split groups/charts train=%d/%d val=%d/%d test=%d/%d; using %s",
+        counts["train"][0],
+        counts["train"][1],
+        counts["val"][0],
+        counts["val"][1],
+        counts["test"][0],
+        counts["test"][1],
+        split_name,
+    )
+    grid_dir = Path(args.grid_dir) if args.grid_dir else audio_grid_dir()
+    require_grid = not args.build_grid
+    paths = filter_v0_paths(
+        by_split[split_name],
+        require_grid=require_grid,
+        grid_dir=grid_dir,
+        min_window_bars=WINDOW_BARS,
+    )
+    logger.info(
+        "v0-eligible %s charts=%d (of %d in split, %d groups, require_grid=%s)",
+        split_name,
+        len(paths),
+        n_c,
+        n_g,
+        require_grid,
+    )
+    if args.limit is not None and args.limit < len(paths):
+        rng = random.Random(args.seed)
+        paths = rng.sample(paths, args.limit)
+        logger.info("subsampled to %d charts (--limit)", len(paths))
     return paths
+
+
+def _load_split(args: argparse.Namespace):
+    split_path = (
+        Path(args.split_manifest) if args.split_manifest else default_split_manifest_path()
+    )
+    manifest = load_split_manifest(
+        split_path,
+        expected_scheme=SPLIT_SCHEME,
+        expected_group_by=GROUP_BY,
+    )
+    return manifest, raw_dir()
 
 
 def main() -> None:
@@ -39,7 +118,24 @@ def main() -> None:
         required=True,
         help="teacher=masked token acc; infer=note F1 with the same DecodeConfig as audio2map-infer",
     )
-    p.add_argument("--limit", type=int, default=100, help="teacher: max charts to sample")
+    p.add_argument(
+        "--split-manifest",
+        type=str,
+        default=None,
+        help="split JSON (default: DATA/splits/beatmapset_v1.json)",
+    )
+    p.add_argument(
+        "--split",
+        choices=("train", "val", "test"),
+        default=None,
+        help="teacher: frozen split to evaluate (default: test). With --osu, require that chart's group.",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="teacher: optional subsample of the selected split (default: all)",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--checkpoint", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda")
@@ -96,10 +192,7 @@ def main() -> None:
         print(json.dumps({"charts": 1, "notes": stats.to_dict()}, indent=2))
         return
 
-    if args.osu:
-        paths = [Path(args.osu)]
-    else:
-        paths = _pick_paths(args.limit, args.seed)
+    paths = _teacher_paths(args)
     if not paths:
         raise SystemExit("no charts to evaluate")
 

@@ -72,5 +72,5 @@ Full-chart encode → decode is checked in tests against **TickNote**, not raw m
 ```python
 from audio2map.grid import CanonicalTiming, TickNote
 from audio2map.tokens import encode_notes, build_vocab, tokens_to_notes
-from audio2map.generate.decode import ChartDecodeState
+from audio2map.tokens.state import ChartState
 ```

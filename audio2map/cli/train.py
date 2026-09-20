@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--save-every", type=int, default=2000)
+    p.add_argument("--val-every", type=int, default=2000)
+    p.add_argument("--val-samples-per-chart", type=int, default=1)
     p.add_argument("--out", type=str, default=None, help="checkpoint directory")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument(
@@ -45,6 +47,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="chart_meta/manifest.jsonl (default: DATA/chart_meta/manifest.jsonl if present)",
     )
+    p.add_argument(
+        "--split-manifest",
+        type=str,
+        default=None,
+        help="split JSON (default: DATA/splits/beatmapset_v1.json)",
+    )
+    p.add_argument(
+        "--init-split",
+        action="store_true",
+        help="create the split manifest from raw/ layout (never overwrites; use a new path e.g. beatmapset_v2.json)",
+    )
+    p.add_argument(
+        "--allow-set-id-mismatch",
+        action="store_true",
+        help="when --init-split, continue if BeatmapSetID disagrees with the folder name",
+    )
+    p.add_argument("--split-seed", type=int, default=0)
+    p.add_argument("--train-ratio", type=float, default=0.8)
+    p.add_argument("--val-ratio", type=float, default=0.1)
+    p.add_argument("--test-ratio", type=float, default=0.1)
     p.add_argument(
         "--precision",
         choices=("bf16", "fp32"),
@@ -101,9 +123,18 @@ def main() -> None:
         seed=args.seed,
         log_every=args.log_every,
         save_every=args.save_every,
+        val_every=args.val_every,
+        val_samples_per_chart=args.val_samples_per_chart,
         out=Path(args.out) if args.out else None,
         num_workers=args.num_workers,
         meta_manifest=Path(args.meta_manifest) if args.meta_manifest else None,
+        split_manifest=Path(args.split_manifest) if args.split_manifest else None,
+        init_split=args.init_split,
+        allow_set_id_mismatch=args.allow_set_id_mismatch,
+        split_seed=args.split_seed,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
         precision=args.precision,
         lazy=args.lazy,
         grid_dir=Path(args.grid_dir) if args.grid_dir else None,

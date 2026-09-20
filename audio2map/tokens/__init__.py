@@ -2,6 +2,7 @@
 
 from audio2map.tokens.decode import DecodeIssue, DecodeResult, tokens_to_notes
 from audio2map.tokens.encode import encode_notes, initial_row_at_bar
+from audio2map.tokens.state import ChartState, bos_initial_prefix
 from audio2map.tokens.vocab import (
     EVENT_LANE_STATES,
     TOKEN_BAR,
@@ -38,8 +39,10 @@ __all__ = [
     "TOKEN_ROW_PREFIX",
     "LaneState",
     "RowState",
+    "ChartState",
     "active_hold_from_initial_row",
     "apply_row",
+    "bos_initial_prefix",
     "DecodeIssue",
     "DecodeResult",
     "build_vocab",

@@ -9,6 +9,7 @@ from audio2map.osu.parser import (
     is_mania_4k,
     is_mania_4k_sections,
     parse_beatmap,
+    parse_chart_metadata,
     parse_hit_object,
     x_to_column,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "is_mania_4k",
     "is_mania_4k_sections",
     "parse_beatmap",
+    "parse_chart_metadata",
     "parse_hit_object",
     "osu_export_names",
     "summarize_beatmap_timing",

@@ -1,12 +1,15 @@
-"""Constrained decoding state machine for ROW tokens."""
+"""Window chart-token grammar: legal next tokens and state transitions.
+
+This is the shared prefix machine used by encode/decode checks, constrained
+generation, and logit-level validity. It does not sample or score tokens.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from audio2map.grid import TICKS_PER_BAR
-from audio2map.model.config import WINDOW_BARS
-from audio2map.tokens import (
+from audio2map.tokens.vocab import (
     TOKEN_BAR,
     TOKEN_BOS,
     TOKEN_EOS,
@@ -26,19 +29,22 @@ from audio2map.tokens import (
 
 
 @dataclass(slots=True)
-class ChartDecodeState:
-    """Track parser state while autoregressively emitting chart tokens."""
+class ChartState:
+    """Track grammar state while walking a framed window sequence.
+
+    Window ``<EOS>`` is allowed while holds are still active; a window is not a
+    full chart, so open holds at the boundary are normal.
+    """
 
     vocab: dict[str, int] = field(default_factory=build_vocab)
     id_to_token: dict[int, str] = field(default_factory=dict)
-    window_bars: int = WINDOW_BARS
+    window_bars: int = 0
     bars_done: int = 0
     in_bar: bool = False
     last_pos: int | None = None
     expect_row: bool = False
     active_hold: list[bool] = field(default_factory=lambda: [False, False, False, False])
     finished: bool = False
-    force_next_bar: bool = False
     _event_row_ids: set[int] = field(default_factory=set)
     _pos_ids: list[int] = field(default_factory=list)
     _bar_id: int = 0
@@ -59,21 +65,14 @@ class ChartDecodeState:
         *,
         window_bars: int,
         vocab: dict[str, int] | None = None,
-    ) -> ChartDecodeState:
+    ) -> ChartState:
         state = cls(vocab=vocab or build_vocab(), window_bars=window_bars)
         state.active_hold = active_hold_from_initial_row(initial_row)
         return state
 
-    def require_bar_after_prompt(self) -> None:
-        """Next sampled token must be ``<BAR>`` (start keep region after overlap context)."""
-        self.force_next_bar = True
-
     def allowed_token_ids(self) -> set[int]:
         if self.finished:
             return set()
-
-        if self.force_next_bar:
-            return {self._bar_id}
 
         allowed: set[int] = set()
         if not self.in_bar:
@@ -103,10 +102,11 @@ class ChartDecodeState:
     def observe(self, token_id: int) -> None:
         tok = self.id_to_token[token_id]
         if tok == TOKEN_EOS:
+            if self.in_bar:
+                self.bars_done += 1
             self.finished = True
             return
         if tok == TOKEN_BAR:
-            self.force_next_bar = False
             if self.in_bar:
                 self.bars_done += 1
             self.in_bar = True
@@ -123,13 +123,6 @@ class ChartDecodeState:
             self.expect_row = False
             return
         raise ValueError(f"unexpected token during decode: {tok!r}")
-
-    def observe_and_advance_bar_if_needed(self, token_id: int) -> None:
-        """Like ``observe`` but auto-close empty trailing bar before EOS."""
-        tok = self.id_to_token[token_id]
-        if tok == TOKEN_EOS and self.in_bar and self.last_pos is None:
-            self.bars_done += 1
-        self.observe(token_id)
 
 
 def bos_initial_prefix(initial_row_id: int, *, vocab: dict[str, int] | None = None) -> list[int]:

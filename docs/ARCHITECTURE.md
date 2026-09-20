@@ -8,7 +8,7 @@ Dependency direction is one-way, low → high; each layer may only import layers
 (`uv run lint-imports`, config in `pyproject.toml`):
 
 ```text
-cli → eval → train → generate → dataset → model → features → tokens → grid → osu → utils
+cli → eval → train → generate → dataset → model → features → metrics → tokens → grid → osu → utils
 ```
 
 Vendored MinaCalc (`features/cond/ett/`) and the YAVSRG pattern analyser
@@ -20,6 +20,10 @@ Consequences:
 - `model/config.py` owns shared constants (`WINDOW_BARS`, `MAX_DECODER_LEN`, …) so `dataset/` never imports `train/`.
 - Inference lives in `generate/` (not `train/`); `generate/service.py` is the single end-to-end
   pipeline used by `audio2map-infer` and the demo backend.
+- Chart token grammar lives in `tokens/state.py` (`ChartState`). Generation and validity both
+  use it; do not add sampling to `ChartState`.
+- `metrics/` is shared by train and eval (token NLL, token accuracy, logit validity). It may import
+  `tokens` (and torch) only — not generate, dataset, or model.
 
 ## Two `.osu` parsers
 

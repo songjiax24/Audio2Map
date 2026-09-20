@@ -11,6 +11,7 @@ from audio2map.osu.parser import (
     audio_filename,
     chart_audio_path,
     is_mania_4k,
+    parse_chart_metadata,
     parse_hit_object,
     parse_notes,
     parse_timing_points,
@@ -270,3 +271,15 @@ def test_chart_audio_path_missing_filename(tmp_path: Path) -> None:
     osu.write_text("[General]\nMode: 3\n", encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="missing AudioFilename"):
         chart_audio_path(osu)
+
+
+def test_parse_chart_metadata_does_not_require_4k(tmp_path: Path) -> None:
+    osu = tmp_path / "meta.osu"
+    osu.write_text(
+        "[Metadata]\nBeatmapID: 9\nBeatmapSetID: 42\nTitle: x\n",
+        encoding="utf-8",
+    )
+    meta = parse_chart_metadata(osu)
+    assert meta.beatmap_id == 9
+    assert meta.beatmap_set_id == 42
+    assert meta.title == "x"

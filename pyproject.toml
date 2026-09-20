@@ -87,8 +87,22 @@ layers = [
     "audio2map.dataset",
     "audio2map.model",
     "audio2map.features",
+    "audio2map.metrics",
     "audio2map.tokens",
     "audio2map.grid",
     "audio2map.osu",
     "audio2map.utils",
+]
+
+[[tool.importlinter.contracts]]
+name = "metrics does not import train/eval/generate/dataset/model/features"
+type = "forbidden"
+source_modules = ["audio2map.metrics"]
+forbidden_modules = [
+    "audio2map.train",
+    "audio2map.eval",
+    "audio2map.generate",
+    "audio2map.dataset",
+    "audio2map.model",
+    "audio2map.features",
 ]

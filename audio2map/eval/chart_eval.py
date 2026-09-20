@@ -13,7 +13,6 @@ import torch
 
 from audio2map.dataset.sample import build_sample
 from audio2map.eval.note_match import NoteMatchStats, compare_note_lists
-from audio2map.eval.token_accuracy import SplitTokenAccuracy, split_token_accuracy
 from audio2map.generate.overlap import (
     DecodeConfig,
     GenerationRangeConfig,
@@ -22,6 +21,10 @@ from audio2map.generate.overlap import (
 )
 from audio2map.generate.service import resolve_audio_file
 from audio2map.grid import CanonicalTiming
+from audio2map.metrics.nll import token_nll_stats
+from audio2map.metrics.token import SplitTokenAccuracy, split_token_accuracy
+from audio2map.metrics.validity import ValidityStats, logit_validity
+from audio2map.model.config import WINDOW_BARS
 from audio2map.model.model import AudioChartModel
 from audio2map.osu.parser import parse_beatmap
 from audio2map.tokens import invert_vocab
@@ -34,13 +37,18 @@ class AggregateStats:
     charts: int = 0
     token_correct: int = 0
     token_total: int = 0
+    loss_sum: float = 0.0
     split_token: SplitTokenAccuracy = field(default_factory=SplitTokenAccuracy)
+    validity: ValidityStats = field(default_factory=ValidityStats)
 
     def to_dict(self) -> dict:
         return {
             "charts": self.charts,
+            "loss": self.loss_sum / self.token_total if self.token_total else 0.0,
             "token_acc": self.token_correct / self.token_total if self.token_total else 0.0,
             "split_token_acc": self.split_token.to_dict(),
+            "legal_top1": self.validity.legal_top1,
+            "legal_probability": self.validity.legal_probability,
         }
 
 
@@ -53,6 +61,7 @@ def eval_teacher_forcing(
     build_grid_if_missing: bool = False,
     fixed_start_bar: int | None = None,
     grid_dir: Path | None = None,
+    window_bars: int = WINDOW_BARS,
 ) -> AggregateStats:
     """Token accuracy with GT prefix (diagnostic upper bound)."""
     agg = AggregateStats()
@@ -83,13 +92,22 @@ def eval_teacher_forcing(
             logits = model(audio, cond, token_ids, attn_mask=attn)
             targets = token_ids[:, 1:]
             mask = loss_mask[:, 1:]
+            loss_sum, valid, correct = token_nll_stats(logits, targets, mask)
+            agg.loss_sum += float(loss_sum.item())
+            agg.token_correct += int(correct.item())
+            agg.token_total += int(valid.item())
             pred = logits.argmax(dim=-1)
-            correct = ((pred == targets) & mask.bool()).sum().item()
-            total = mask.sum().item()
-            agg.token_correct += int(correct)
-            agg.token_total += int(total)
             agg.split_token.merge(
                 split_token_accuracy(pred[0], targets[0], mask[0], id_to_token=id_to_token)
+            )
+            agg.validity.merge(
+                logit_validity(
+                    logits,
+                    token_ids,
+                    loss_mask,
+                    window_bars=window_bars,
+                    id_to_token=id_to_token,
+                )
             )
 
     return agg

@@ -15,7 +15,14 @@ heads: 8
 dropout: 0.1
 log_every: 50
 save_every: 2000
+val_every: 2000
+val_samples_per_chart: 1
 precision: bf16
+# split scheme (not a model version): DATA/splits/beatmapset_v1.json
+split_seed: 0
+train_ratio: 0.8
+val_ratio: 0.1
+test_ratio: 0.1
 # must equal WINDOW_BARS; not a training flag
 window_bars: 16
 # audio: 128-d log-mel, feature spec v3

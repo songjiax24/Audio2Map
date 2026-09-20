@@ -146,6 +146,11 @@ def _parse_int(value: str | None) -> int | None:
     return int(value)
 
 
+def parse_chart_metadata(path: Path | str) -> ChartMetadata:
+    """Read ``[Metadata]`` only; does not require mania 4K or hit objects."""
+    return _parse_metadata(read_osu_sections(path))
+
+
 def parse_timing_points(lines: list[str]) -> list[TimingPoint]:
     points: list[TimingPoint] = []
     for line in lines:

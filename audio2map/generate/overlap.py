@@ -30,7 +30,9 @@ from audio2map.tokens import (
     TOKEN_EOS,
     TOKEN_POS_PREFIX,
     TOKEN_ROW_PREFIX,
+    ChartState,
     RowState,
+    bos_initial_prefix,
     build_vocab,
     initial_row_from_active_hold,
     invert_vocab,
@@ -38,7 +40,6 @@ from audio2map.tokens import (
     tokens_to_notes,
 )
 from audio2map.osu.schema import ManiaNote
-from audio2map.generate.decode import ChartDecodeState, bos_initial_prefix
 from audio2map.model.config import MAX_DECODER_LEN, WINDOW_BARS
 from audio2map.model.model import AudioChartModel
 from audio2map.utils.paths import audio_grid_dir
@@ -227,14 +228,14 @@ def initial_row_from_committed_bars(
     if win_start <= gen_start:
         return empty
 
-    decode = ChartDecodeState.from_initial_row(
+    decode = ChartState.from_initial_row(
         empty,
         window_bars=max(1, win_start - gen_start),
         vocab=vocab,
     )
     for bar in range(gen_start, win_start):
         for tid in committed_bars.get(bar, []):
-            decode.observe_and_advance_bar_if_needed(tid)
+            decode.observe(tid)
     return initial_row_from_active_hold(decode.active_hold)
 
 
@@ -374,6 +375,9 @@ def generate_window_tokens(
 
     When ``prompt_token_ids`` is set, it must be
     ``<BOS> + <ROW_initial> + context chart tokens`` for overlap windows.
+    Generation always injects a ``<BAR>`` after that prefix: first windows only
+    allow ``<BAR>`` there, and overlap keep still starts on a bar boundary even
+    if grammar would allow a later POS.
     """
     decode = decode or DecodeConfig()
     cap = model.max_decoder_len if max_seq_len is None else min(model.max_decoder_len, max_seq_len)
@@ -387,11 +391,13 @@ def generate_window_tokens(
     else:
         token_ids = bos_initial_prefix(initial_id, vocab=vocab)
 
-    state = ChartDecodeState.from_initial_row(initial_row, window_bars=window_bars, vocab=vocab)
+    state = ChartState.from_initial_row(initial_row, window_bars=window_bars, vocab=vocab)
     for tid in token_ids[2:]:
         state.observe(tid)
-    if prompt_token_ids is not None and len(token_ids) > 2:
-        state.require_bar_after_prompt()
+    if len(token_ids) < cap:
+        bar_id = vocab[TOKEN_BAR]
+        token_ids.append(bar_id)
+        state.observe(bar_id)
 
     audio_b = audio.unsqueeze(0).to(device)
     cond_b = cond_vec.unsqueeze(0).to(device)
@@ -399,10 +405,9 @@ def generate_window_tokens(
     while not state.finished and len(token_ids) < cap:
         ids = torch.tensor([token_ids], dtype=torch.long, device=device)
         logits = model.next_token_logits(audio_b, cond_b, ids)[0]
-        allowed = state.allowed_token_ids()
-        next_id = sample_next_token_id(logits, allowed, decode)
+        next_id = sample_next_token_id(logits, state.allowed_token_ids(), decode)
         token_ids.append(next_id)
-        state.observe_and_advance_bar_if_needed(next_id)
+        state.observe(next_id)
         if id_to_token[next_id] == TOKEN_EOS:
             break
 

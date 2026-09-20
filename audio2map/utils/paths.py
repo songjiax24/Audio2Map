@@ -67,6 +67,11 @@ def chart_meta_dir() -> Path:
     return get_data_root() / "chart_meta"
 
 
+def splits_dir() -> Path:
+    """Frozen train/val/test split manifests (dataset contract, not a run)."""
+    return get_data_root() / "splits"
+
+
 def formal_checkpoint_dir() -> Path:
     """Default formal training checkpoint directory."""
     return processed_dir() / "checkpoints" / FORMAL_CHECKPOINT_NAME

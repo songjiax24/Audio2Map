@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-from audio2map.dataset.filter import check_beatmap_eligibility
+from audio2map.dataset.filter import check_beatmap_eligibility, check_osu_path
 from audio2map.dataset.windows import audio_covers_training_window
 from audio2map.features.audio.grid import (
     AudioGridMeta,
@@ -110,6 +110,22 @@ def grid_covers_training_window(
         return audio_covers_training_window(start, end, window_bars=window_bars)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
+
+
+def filter_v0_paths(
+    paths: list[Path],
+    *,
+    require_grid: bool,
+    grid_dir: Path,
+    min_window_bars: int = WINDOW_BARS,
+) -> list[Path]:
+    """Apply v0 chart eligibility, then optionally require a long-enough audio grid."""
+    kept = [path for path in paths if check_osu_path(path).eligible]
+    if require_grid:
+        kept = filter_paths_with_grid(
+            kept, grid_dir=grid_dir, min_window_bars=min_window_bars
+        )
+    return kept
 
 
 def filter_paths_with_grid(

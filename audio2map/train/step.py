@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
+from audio2map.metrics.nll import token_nll_stats
 from audio2map.model.model import AudioChartModel
+
+__all__ = ["token_nll_stats", "compute_loss", "scale_grads_by_valid_tokens", "training_step"]
 
 
 def compute_loss(
@@ -13,21 +15,27 @@ def compute_loss(
     targets: torch.Tensor,
     loss_mask: torch.Tensor,
 ) -> torch.Tensor:
-    b, l, v = logits.shape
-    logits = logits.reshape(b * l, v)
-    targets = targets.reshape(b * l)
-    mask = loss_mask.reshape(b * l)
-    ce = F.cross_entropy(logits, targets, reduction="none")
-    weighted = ce * mask
-    if mask.sum() == 0:
-        return weighted.sum()
-    return weighted.sum() / mask.sum()
+    loss_sum, valid, _ = token_nll_stats(logits, targets, loss_mask)
+    if float(valid.item()) == 0.0:
+        return loss_sum
+    return loss_sum / valid
+
+
+def scale_grads_by_valid_tokens(model: torch.nn.Module, n_valid: float) -> None:
+    """Turn accumulated ``∂(Σℓ)/∂θ`` into the token-mean CE gradient."""
+    if n_valid <= 0.0:
+        return
+    inv = 1.0 / n_valid
+    for param in model.parameters():
+        if param.grad is not None:
+            param.grad.mul_(inv)
 
 
 def training_step(
     model: AudioChartModel,
     batch: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, dict[str, float]]:
+    """Return masked CE **sum** (for backward) and detached token stats."""
     logits = model(
         batch["audio"],
         batch["cond_vec"],
@@ -37,12 +45,14 @@ def training_step(
     )
     targets = batch["token_ids"][:, 1:]
     mask = batch["loss_mask"][:, 1:]
-    loss = compute_loss(logits, targets, mask)
-    with torch.no_grad():
-        pred = logits.argmax(dim=-1)
-        acc = ((pred == targets) & mask.bool()).float().sum() / mask.sum().clamp(min=1)
-    return loss, {
-        "loss": float(loss.item()),
-        "token_acc": float(acc.item()),
+    loss_sum, valid, correct = token_nll_stats(logits, targets, mask)
+    n_valid = float(valid.detach().item())
+    token_acc = 0.0 if n_valid == 0.0 else float(correct.detach().item()) / n_valid
+    return loss_sum, {
+        "loss": float((loss_sum / valid).detach().item()) if n_valid else 0.0,
+        "token_acc": token_acc,
+        "loss_sum": float(loss_sum.detach().item()),
+        "valid_tokens": n_valid,
+        "correct_tokens": float(correct.detach().item()),
         "audio_ticks": float(batch["audio"].shape[1]),
     }

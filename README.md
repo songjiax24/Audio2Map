@@ -78,6 +78,7 @@ $AUDIO2MAP_DATA_ROOT/
 │   ├── logs/
 │   └── generated/
 ├── chart_meta/               # manifest.jsonl (SR, MSD, pattern stats)
+├── splits/                   # beatmapset_v1.json (split scheme, not a model version)
 └── .collector/
 ```
 
@@ -157,6 +158,7 @@ audio2map-grid precompute   # skips valid; for new raw sets
 
 ```bash
 audio2map-train --config configs/train/train_multi.yaml
+# first run on a new data disk: add --init-split to write splits/beatmapset_v1.json
 # defaults: 200k steps, batch 16, d_model=512, enc=4/dec=6/heads=8,
 #           samples_per_chart=4, bf16 → processed/checkpoints/formal_enc_dec_v3/
 ```
@@ -175,10 +177,17 @@ audio2map-train \
 - Grid required by default (`--allow-missing-grid` to opt out)
 - Architecture is **enc_dec only** (no `--architecture` / bar-pooling flags)
 - No `--resume`: each run starts at step 0
+- Train/val/test come from `splits/beatmapset_v1.json` (create once with `--init-split`; never overwrite — use `beatmapset_v2.json` for a new split)
 
 ### 4. Evaluate / generate
 
 ```bash
+audio2map-eval --mode teacher \
+  --checkpoint .../step_200000.pt \
+  --split-manifest "$AUDIO2MAP_DATA_ROOT/splits/beatmapset_v1.json" \
+  --split test
+
+# debug one chart (does not sample the frozen test split):
 audio2map-eval --mode teacher \
   --checkpoint .../step_200000.pt \
   --osu "path/to/chart.osu" --start-bar 8

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from audio2map.eval.note_match import compare_note_lists
-from audio2map.eval.token_accuracy import SplitTokenAccuracy, split_token_accuracy
+from audio2map.metrics.token import SplitTokenAccuracy, split_token_accuracy
 from audio2map.grid import CanonicalTiming
 from audio2map.osu.schema import ManiaNote, NoteType
 from audio2map.tokens import (
@@ -85,6 +85,30 @@ def test_hold_recall_is_per_lane() -> None:
     assert end_miss.row_correct == 0
 
 
+def test_tap_recall_is_per_lane() -> None:
+    vocab = build_vocab()
+    id_to_token = invert_vocab(vocab)
+    empty = (LaneState.EMPTY, LaneState.EMPTY, LaneState.EMPTY, LaneState.EMPTY)
+    gt_tap = row_state_to_token((LaneState.TAP, *empty[1:]))
+    wrong_lane = row_state_to_token((*empty[:3], LaneState.TAP))
+    tgt = torch.tensor([vocab[gt_tap]])
+    mask = torch.tensor([1.0])
+
+    miss = split_token_accuracy(
+        torch.tensor([vocab[wrong_lane]]), tgt, mask, id_to_token=id_to_token
+    )
+    assert miss.tap_recall_den == 1
+    assert miss.tap_recall_num == 0
+    assert miss.hold_start_recall_den == 0
+
+    hit = split_token_accuracy(
+        torch.tensor([vocab[gt_tap]]), tgt, mask, id_to_token=id_to_token
+    )
+    assert hit.tap_recall_num == 1
+    assert hit.row_correct == 1
+
+
 def test_split_token_empty_rates_are_zero() -> None:
     assert SplitTokenAccuracy().to_dict()["hold_start_recall"] == 0.0
+    assert SplitTokenAccuracy().to_dict()["tap_recall"] == 0.0
     assert SplitTokenAccuracy().to_dict()["bar_acc"] == 0.0

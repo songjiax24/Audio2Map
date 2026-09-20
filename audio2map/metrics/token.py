@@ -1,4 +1,4 @@
-"""Split token accuracy by type (BAR / POS / ROW / EOS) and per-lane hold recall."""
+"""Split token accuracy by type (BAR / POS / ROW / EOS) and per-lane event recall."""
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ class SplitTokenAccuracy:
     row_lane_total: int = 0
     eos_correct: int = 0
     eos_total: int = 0
+    tap_recall_num: int = 0
+    tap_recall_den: int = 0
     hold_start_recall_num: int = 0
     hold_start_recall_den: int = 0
     hold_end_recall_num: int = 0
@@ -53,6 +55,7 @@ class SplitTokenAccuracy:
             "row_exact_acc": _ratio(self.row_correct, self.row_total),
             "row_lane_acc": _ratio(self.row_lane_correct, self.row_lane_total),
             "eos_acc": _ratio(self.eos_correct, self.eos_total),
+            "tap_recall": _ratio(self.tap_recall_num, self.tap_recall_den),
             "hold_start_recall": _ratio(self.hold_start_recall_num, self.hold_start_recall_den),
             "hold_end_recall": _ratio(self.hold_end_recall_num, self.hold_end_recall_den),
             "other_acc": _ratio(self.other_correct, self.other_total),
@@ -97,7 +100,10 @@ def split_token_accuracy(
                 plane = prow[i] if prow is not None else None
                 if plane == tlane:
                     out.row_lane_correct += 1
-                if tlane == LaneState.HOLD_START:
+                if tlane == LaneState.TAP:
+                    out.tap_recall_den += 1
+                    out.tap_recall_num += int(plane == LaneState.TAP)
+                elif tlane == LaneState.HOLD_START:
                     out.hold_start_recall_den += 1
                     out.hold_start_recall_num += int(plane == LaneState.HOLD_START)
                 elif tlane == LaneState.HOLD_END:

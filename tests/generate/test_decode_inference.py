@@ -10,13 +10,13 @@ from audio2map.tokens import (
     TOKEN_BAR,
     TOKEN_BOS,
     TOKEN_EOS,
+    ChartState,
     LaneState,
     build_vocab,
     invert_vocab,
     pos_to_token,
     row_state_to_token,
 )
-from audio2map.generate.decode import ChartDecodeState
 
 _EMPTY = (
     LaneState.EMPTY,
@@ -50,43 +50,109 @@ def test_decode_state_matches_valid_sequence() -> None:
         TOKEN_EOS,
     ]
 
-    state = ChartDecodeState.from_initial_row(_EMPTY, window_bars=2, vocab=vocab)
+    state = ChartState.from_initial_row(_EMPTY, window_bars=2, vocab=vocab)
     ids = [vocab[t] for t in tokens]
     for tid in ids[2:]:
         allowed = state.allowed_token_ids()
         assert tid in allowed, (invert_vocab()[tid], allowed)
-        state.observe_and_advance_bar_if_needed(tid)
-    assert state.finished
-
-
-def test_force_bar_after_context_prompt_replay() -> None:
-    vocab = build_vocab()
-    body = [TOKEN_BAR, pos_to_token(0), row_state_to_token(_TAP)]
-    state = ChartDecodeState.from_initial_row(_EMPTY, window_bars=16, vocab=vocab)
-    for tid in [vocab[t] for t in body]:
         state.observe(tid)
-    assert vocab[pos_to_token(48)] in state.allowed_token_ids()
-    state.require_bar_after_prompt()
-    assert state.allowed_token_ids() == {vocab[TOKEN_BAR]}
-    state.observe(vocab[TOKEN_BAR])
-    assert not state.force_next_bar
-    assert vocab[pos_to_token(0)] in state.allowed_token_ids()
+    assert state.finished
+    assert state.bars_done == 2
 
 
-def test_no_context_still_forces_first_bar() -> None:
+def test_overlap_keep_starts_with_injected_bar() -> None:
+    import torch
+
+    from audio2map.generate.overlap import DecodeConfig, generate_window_tokens
+
     vocab = build_vocab()
-    state = ChartDecodeState.from_initial_row(_EMPTY, window_bars=16, vocab=vocab)
-    assert state.allowed_token_ids() == {vocab[TOKEN_BAR]}
+    bar_id = vocab[TOKEN_BAR]
+    eos_id = vocab[TOKEN_EOS]
+    pos48 = vocab[pos_to_token(48)]
+    prompt = [
+        vocab[TOKEN_BOS],
+        vocab[row_state_to_token(_EMPTY)],
+        bar_id,
+        vocab[pos_to_token(0)],
+        vocab[row_state_to_token(_TAP)],
+    ]
+    state = ChartState.from_initial_row(_EMPTY, window_bars=1, vocab=vocab)
+    for tid in prompt[2:]:
+        state.observe(tid)
+    assert pos48 in state.allowed_token_ids()
+
+    class _Stub:
+        max_decoder_len = 2048
+
+        def eval(self):
+            return self
+
+        def next_token_logits(self, audio, cond, token_ids, **kwargs):
+            logits = torch.full((token_ids.shape[0], len(vocab)), -1e9)
+            logits[:, eos_id] = 10.0
+            logits[:, pos48] = 5.0
+            return logits
+
+    out = generate_window_tokens(
+        _Stub(),  # type: ignore[arg-type]
+        audio=torch.zeros(8, 4),
+        cond_vec=torch.zeros(18),
+        initial_row=_EMPTY,
+        window_bars=1,
+        device=torch.device("cpu"),
+        decode=DecodeConfig(temperature=0.0),
+        prompt_token_ids=prompt,
+        vocab=vocab,
+    )
+    assert out[: len(prompt) + 1] == prompt + [bar_id]
+    assert out[-1] == eos_id
+
+
+def test_no_context_starts_with_injected_bar() -> None:
+    import torch
+
+    from audio2map.generate.overlap import DecodeConfig, generate_window_tokens
+    from audio2map.tokens import bos_initial_prefix
+
+    vocab = build_vocab()
+    bar_id = vocab[TOKEN_BAR]
+    eos_id = vocab[TOKEN_EOS]
+    prefix = bos_initial_prefix(vocab[row_state_to_token(_EMPTY)], vocab=vocab)
+
+    class _Stub:
+        max_decoder_len = 2048
+
+        def eval(self):
+            return self
+
+        def next_token_logits(self, audio, cond, token_ids, **kwargs):
+            logits = torch.full((token_ids.shape[0], len(vocab)), -1e9)
+            logits[:, eos_id] = 0.0
+            return logits
+
+    out = generate_window_tokens(
+        _Stub(),  # type: ignore[arg-type]
+        audio=torch.zeros(8, 4),
+        cond_vec=torch.zeros(18),
+        initial_row=_EMPTY,
+        window_bars=1,
+        device=torch.device("cpu"),
+        decode=DecodeConfig(temperature=0.0),
+        vocab=vocab,
+    )
+    assert out[:3] == prefix + [bar_id]
+    assert out[-1] == eos_id
 
 
 def test_decode_empty_bars() -> None:
     vocab = build_vocab()
     tokens = [TOKEN_BOS, row_state_to_token(_EMPTY), TOKEN_BAR, TOKEN_BAR, TOKEN_EOS]
-    state = ChartDecodeState.from_initial_row(_EMPTY, window_bars=2, vocab=vocab)
+    state = ChartState.from_initial_row(_EMPTY, window_bars=2, vocab=vocab)
     for tid in [vocab[t] for t in tokens[2:]]:
         assert tid in state.allowed_token_ids()
-        state.observe_and_advance_bar_if_needed(tid)
+        state.observe(tid)
     assert state.finished
+    assert state.bars_done == 2
 
 
 def _union_covers_range(intervals: list[tuple[int, int]], start: int, end: int) -> bool:
