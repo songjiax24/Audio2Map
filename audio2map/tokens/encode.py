@@ -103,6 +103,23 @@ def _event_rows(
     return rows
 
 
+def chart_event_rows(
+    notes: list[ManiaNote],
+    timing: CanonicalTiming,
+) -> dict[int, RowState]:
+    """``tick -> RowState`` for every tick that has a tap, hold head, or hold tail.
+
+    Lanes without an action on that tick are ``EMPTY`` or ``HOLD_ACTIVE``.
+    """
+    raw = _notes_to_raw_events(notes, timing)
+    if not raw:
+        return {}
+    start_tick = min(raw)
+    end_tick = max(raw) + 1
+    active = _active_hold_at_tick(raw, start_tick)
+    return _event_rows(raw, start_tick=start_tick, end_tick=end_tick, active=active)
+
+
 def _tokens_from_event_rows(
     rows: dict[int, RowState],
     *,

@@ -115,6 +115,7 @@ class GenerationReport:
     last_note_bar: int | None = None
     tail_note_count: int = 0
     audio_ticks_per_window: int = 0
+    chart_validity: str | None = None
     decode_issues: list[dict[str, str | int]] = field(default_factory=list)
     windows: list[WindowGenerationLog] = field(default_factory=list)
 
@@ -214,6 +215,37 @@ def sample_next_token_id(
     sub = sub / sub.sum().clamp(min=1e-12)
     idx = int(torch.multinomial(sub, 1).item())
     return allowed_list[idx]
+
+
+def sample_unconstrained_token_id(logits: torch.Tensor, decode: DecodeConfig) -> int:
+    """Sample from the full vocabulary. Top-k / top-p are not restricted to legal ids."""
+    if decode.temperature <= 0:
+        return int(logits.argmax().item())
+
+    probs = F.softmax(logits / decode.temperature, dim=-1)
+    index = list(range(int(probs.shape[0])))
+    sub = probs
+    if decode.top_k > 0 and sub.numel() > decode.top_k:
+        keep = torch.topk(sub, decode.top_k).indices
+        sub = sub[keep]
+        index = [index[i] for i in keep.tolist()]
+    if 0 < decode.top_p < 1.0:
+        sorted_probs, order = torch.sort(sub, descending=True)
+        cum = torch.cumsum(sorted_probs, dim=0)
+        cut = int((cum <= decode.top_p).sum().item())
+        cut = max(cut, 0)
+        sub = sorted_probs[: cut + 1]
+        index = [index[i] for i in order[: cut + 1].tolist()]
+    sub = sub / sub.sum().clamp(min=1e-12)
+    pick = int(torch.multinomial(sub, 1).item())
+    return index[pick]
+
+
+@dataclass(frozen=True, slots=True)
+class WindowDecode:
+    token_ids: list[int]
+    status: Literal["valid", "illegal_token", "truncated"]
+    detail: str = ""
 
 
 def initial_row_from_committed_bars(
@@ -357,7 +389,7 @@ def assemble_chart_token_ids(
 
 
 @torch.no_grad()
-def generate_window_tokens(
+def generate_window_decode(
     model: AudioChartModel,
     *,
     audio: torch.Tensor,
@@ -370,14 +402,12 @@ def generate_window_tokens(
     prompt_token_ids: list[int] | None = None,
     vocab: dict[str, int] | None = None,
     id_to_token: dict[int, str] | None = None,
-) -> list[int]:
-    """Generate one window token sequence (including BOS/EOS).
+    constrain: bool = True,
+) -> WindowDecode:
+    """Generate one window. Legality of sampled tokens is judged before ``observe``.
 
-    When ``prompt_token_ids`` is set, it must be
-    ``<BOS> + <ROW_initial> + context chart tokens`` for overlap windows.
-    Generation always injects a ``<BAR>`` after that prefix: first windows only
-    allow ``<BAR>`` there, and overlap keep still starts on a bar boundary even
-    if grammar would allow a later POS.
+    The injected ``<BAR>`` and any context prompt are prefix, not samples.
+    ``constrain=False`` does not raise on truncation or an illegal token.
     """
     decode = decode or DecodeConfig()
     cap = model.max_decoder_len if max_seq_len is None else min(model.max_decoder_len, max_seq_len)
@@ -405,18 +435,73 @@ def generate_window_tokens(
     while not state.finished and len(token_ids) < cap:
         ids = torch.tensor([token_ids], dtype=torch.long, device=device)
         logits = model.next_token_logits(audio_b, cond_b, ids)[0]
-        next_id = sample_next_token_id(logits, state.allowed_token_ids(), decode)
+        allowed = state.allowed_token_ids()
+        if constrain:
+            next_id = sample_next_token_id(logits, allowed, decode)
+        else:
+            next_id = sample_unconstrained_token_id(logits, decode)
+            if next_id not in allowed:
+                token_ids.append(next_id)
+                return WindowDecode(token_ids, "illegal_token")
         token_ids.append(next_id)
         state.observe(next_id)
         if id_to_token[next_id] == TOKEN_EOS:
             break
 
     if not state.finished:
-        raise RuntimeError(
+        detail = (
             f"window decode truncated at max_seq_len={cap} "
             f"({state.bars_done}/{window_bars} bars, {len(token_ids)} tokens)"
         )
-    return token_ids
+        return WindowDecode(token_ids, "truncated", detail)
+    return WindowDecode(token_ids, "valid")
+
+
+@torch.no_grad()
+def generate_window_tokens(
+    model: AudioChartModel,
+    *,
+    audio: torch.Tensor,
+    cond_vec: torch.Tensor,
+    initial_row: RowState,
+    window_bars: int,
+    device: torch.device,
+    decode: DecodeConfig | None = None,
+    max_seq_len: int | None = None,
+    prompt_token_ids: list[int] | None = None,
+    vocab: dict[str, int] | None = None,
+    id_to_token: dict[int, str] | None = None,
+    constrain: bool = True,
+) -> list[int]:
+    """Generate one window token sequence (including BOS/EOS).
+
+    When ``prompt_token_ids`` is set, it must be
+    ``<BOS> + <ROW_initial> + context chart tokens`` for overlap windows.
+    Generation always injects a ``<BAR>`` after that prefix: first windows only
+    allow ``<BAR>`` there, and overlap keep still starts on a bar boundary even
+    if grammar would allow a later POS.
+
+    Constrained decoding still raises if the window does not finish. Unconstrained
+    decoding returns the tokens and leaves the status on :class:`WindowDecode`;
+    use :func:`generate_window_decode` to read it.
+    """
+    decoded = generate_window_decode(
+        model,
+        audio=audio,
+        cond_vec=cond_vec,
+        initial_row=initial_row,
+        window_bars=window_bars,
+        device=device,
+        decode=decode,
+        max_seq_len=max_seq_len,
+        prompt_token_ids=prompt_token_ids,
+        vocab=vocab,
+        id_to_token=id_to_token,
+        constrain=constrain,
+    )
+    if constrain and decoded.status != "valid":
+        raise RuntimeError(decoded.detail or f"window decode {decoded.status}")
+    return decoded.token_ids
 
 
 @torch.no_grad()
@@ -436,6 +521,7 @@ def generate_chart_notes(
     reference_notes: list[ManiaNote] | None = None,
     build_grid_if_missing: bool = True,
     on_progress: Callable[[int, int], None] | None = None,
+    constrain: bool = True,
 ) -> tuple[list[ManiaNote], GenerationReport]:
     """Generate notes for a chart; default range is full audio (``audio_full``).
 
@@ -527,7 +613,7 @@ def generate_chart_notes(
             if win.context_bars > 0
             else None
         )
-        token_ids = generate_window_tokens(
+        decoded = generate_window_decode(
             model,
             audio=torch.tensor(audio_slice, dtype=torch.float32),
             cond_vec=cond_t,
@@ -539,7 +625,14 @@ def generate_chart_notes(
             prompt_token_ids=prompt_ids,
             vocab=vocab,
             id_to_token=id_to_token,
+            constrain=constrain,
         )
+        if not constrain and decoded.status != "valid":
+            report.chart_validity = decoded.status
+            break
+        if constrain and decoded.status != "valid":
+            raise RuntimeError(decoded.detail or f"window decode {decoded.status}")
+        token_ids = decoded.token_ids
         missing = commit_keep_bar_tokens(
             committed_bars,
             token_ids=token_ids,
@@ -576,6 +669,9 @@ def generate_chart_notes(
         )
         if on_progress is not None:
             on_progress(i + 1, total_windows)
+
+    if not constrain and report.chart_validity is None:
+        report.chart_validity = "valid"
 
     chart_token_ids = assemble_chart_token_ids(
         committed_bars, gen_start=assemble_start, gen_end=assemble_end, vocab=vocab

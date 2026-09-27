@@ -1,7 +1,7 @@
 """ROW token vocabulary, encode, and decode. Does not parse beatmaps from disk."""
 
 from audio2map.tokens.decode import DecodeIssue, DecodeResult, tokens_to_notes
-from audio2map.tokens.encode import encode_notes, initial_row_at_bar
+from audio2map.tokens.encode import chart_event_rows, encode_notes, initial_row_at_bar
 from audio2map.tokens.state import ChartState, bos_initial_prefix
 from audio2map.tokens.vocab import (
     EVENT_LANE_STATES,
@@ -46,6 +46,7 @@ __all__ = [
     "DecodeIssue",
     "DecodeResult",
     "build_vocab",
+    "chart_event_rows",
     "encode_notes",
     "event_row_token_ids",
     "initial_row_at_bar",

@@ -62,6 +62,27 @@ class SplitTokenAccuracy:
         }
 
 
+TOKEN_TYPE_BUCKETS = ("bar", "pos", "row", "eos", "other")
+
+
+def loss_token_bucket(token: str) -> str | None:
+    """Exclusive bucket used by split accuracy and per-type NLL.
+
+    ``None`` means the token is outside the loss taxonomy (``<BOS>`` / ``<PAD>``).
+    """
+    if token in (TOKEN_BOS, TOKEN_PAD):
+        return None
+    if token == TOKEN_BAR:
+        return "bar"
+    if token.startswith(TOKEN_POS_PREFIX):
+        return "pos"
+    if token.startswith(TOKEN_ROW_PREFIX):
+        return "row"
+    if token == TOKEN_EOS:
+        return "eos"
+    return "other"
+
+
 def _pred_row(tok: str) -> RowState | None:
     try:
         return row_state_from_token(tok)
@@ -82,15 +103,16 @@ def split_token_accuracy(
         if not m:
             continue
         pt, tt = id_to_token[int(p)], id_to_token[int(t)]
-        if tt in (TOKEN_BOS, TOKEN_PAD):
+        bucket = loss_token_bucket(tt)
+        if bucket is None:
             continue
-        if tt == TOKEN_BAR:
+        if bucket == "bar":
             out.bar_total += 1
             out.bar_correct += int(pt == tt)
-        elif tt.startswith(TOKEN_POS_PREFIX):
+        elif bucket == "pos":
             out.pos_total += 1
             out.pos_correct += int(pt == tt)
-        elif tt.startswith(TOKEN_ROW_PREFIX):
+        elif bucket == "row":
             trow = row_state_from_token(tt)
             prow = _pred_row(pt)
             out.row_total += 1
@@ -109,7 +131,7 @@ def split_token_accuracy(
                 elif tlane == LaneState.HOLD_END:
                     out.hold_end_recall_den += 1
                     out.hold_end_recall_num += int(plane == LaneState.HOLD_END)
-        elif tt == TOKEN_EOS:
+        elif bucket == "eos":
             out.eos_total += 1
             out.eos_correct += int(pt == tt)
         else:
