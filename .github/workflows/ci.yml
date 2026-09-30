@@ -30,6 +30,9 @@ jobs:
       - name: Import layering (import-linter)
         run: uv run lint-imports
 
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Pytest
         env:
           NUMBA_CACHE_DIR: ${{ runner.temp }}/numba_cache
