@@ -93,6 +93,45 @@ def load_donor_map(path: Path) -> DonorMap:
     return DonorMap.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
+def require_donor_map(
+    path: Path,
+    targets: list[str],
+    *,
+    seed: int | None = None,
+) -> DonorMap:
+    """Load a frozen map. Missing file, seed, or target is an error.
+
+    This does not create or rewrite the file.
+    """
+    mapping = load_donor_map(path)
+    if seed is not None and mapping.seed != seed:
+        raise DonorMapError(f"donor map seed {mapping.seed} != {seed}: {path}")
+    missing = sorted(set(targets) - set(mapping.pairs))
+    if missing:
+        raise DonorMapError(
+            f"{len(missing)} target chart(s) missing from donor map {path}: {missing[:20]}"
+        )
+    return mapping
+
+
+def assert_exact_donor_universe(mapping: DonorMap, relpaths: list[str]) -> None:
+    """The materialized pool must be exactly the frozen map's target set.
+
+    A smaller pool is not treated as the official candidate universe.
+    """
+    got = set(relpaths)
+    expected = set(mapping.pairs)
+    if got == expected:
+        return
+    missing = sorted(expected - got)
+    extra = sorted(got - expected)
+    raise DonorMapError(
+        "materialized candidate pool is not the frozen donor-map universe: "
+        f"missing {len(missing)}, extra {len(extra)}; "
+        f"missing sample {missing[:20]}; extra sample {extra[:20]}"
+    )
+
+
 def create_donor_map(targets: list[str], *, seed: int) -> DonorMap:
     """Draw one donor path per target from ``targets`` itself.
 
@@ -116,7 +155,8 @@ def load_or_create_donor_map(
     """Load an existing map, or create it once when ``path`` is absent.
 
     Every target in this run must already be a key. Missing keys fail. Extra
-    keys already in the file are kept and are not rewritten.
+    keys already in the file are kept and are not rewritten. Official eval
+    does not use this function.
     """
     path = Path(path)
     if path.exists():

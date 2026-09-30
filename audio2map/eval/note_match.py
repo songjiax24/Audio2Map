@@ -202,7 +202,11 @@ def pairwise_note_f1(
     charts: list[list[ManiaNote]],
     timing: CanonicalTiming,
 ) -> dict:
-    """Pairwise lane-aware and lane-agnostic all-notes F1. No similarity threshold."""
+    """Pairwise lane-aware and lane-agnostic all-notes F1. No similarity threshold.
+
+    Official diversity uses ``seed_pair_report``, which keeps the full reference
+    match rather than these two F1 values.
+    """
     pairs = []
     for i in range(len(charts)):
         for j in range(i + 1, len(charts)):

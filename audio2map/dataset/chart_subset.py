@@ -1,7 +1,8 @@
-"""Pinned chart subset for diversity. Membership is the saved path list.
+"""Pinned chart lists for diversity and unconstrained validity.
 
-The seed only draws the list the first time. Later runs load that list, so
-v0 and v1 stay on the same charts when the surrounding pool changes.
+Official eval loads a frozen file with ``require_chart_subset`` and does not
+redraw it. ``load_or_create_chart_subset`` can still draw once for tests; the
+eval CLI does not call it.
 """
 
 from __future__ import annotations
@@ -30,13 +31,17 @@ class ChartSubset:
     def from_dict(cls, data: dict) -> ChartSubset:
         charts = tuple(str(rel) for rel in data.get("charts", []))
         if len(charts) != len(set(charts)):
-            raise ChartSubsetError("diversity subset contains duplicate charts")
+            raise ChartSubsetError("chart subset contains duplicate charts")
         seed = data.get("seed")
         return cls(seed=None if seed is None else int(seed), charts=charts)
 
 
 def default_diversity_subset_path() -> Path:
     return splits_dir() / "diversity_subset.json"
+
+
+def default_unconstrained_subset_path() -> Path:
+    return splits_dir() / "unconstrained_subset.json"
 
 
 def sample_chart_subset(universe: list[str], count: int, *, seed: int) -> tuple[str, ...]:
@@ -50,21 +55,49 @@ def sample_chart_subset(universe: list[str], count: int, *, seed: int) -> tuple[
     return tuple(sorted(chosen))
 
 
-def save_chart_subset(subset: ChartSubset, path: Path) -> None:
+def save_chart_subset(subset: ChartSubset, path: Path, *, kind: str = "diversity subset") -> None:
     path = Path(path)
     if path.exists():
         raise ChartSubsetError(
-            f"diversity subset already exists: {path}; write a new file instead of overwriting"
+            f"{kind} already exists: {path}; write a new file instead of overwriting"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(subset.to_dict(), indent=2), encoding="utf-8")
 
 
-def load_chart_subset(path: Path) -> ChartSubset:
+def load_chart_subset(path: Path, *, kind: str = "diversity subset") -> ChartSubset:
     path = Path(path)
     if not path.is_file():
-        raise ChartSubsetError(f"diversity subset missing: {path}")
+        raise ChartSubsetError(f"{kind} missing: {path}")
     return ChartSubset.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def require_chart_subset(
+    path: Path,
+    universe: list[str],
+    *,
+    seed: int | None = None,
+    count: int | None = None,
+    kind: str = "diversity subset",
+) -> ChartSubset:
+    """Load a frozen subset. Missing file or charts outside ``universe`` fail.
+
+    This does not draw or rewrite the file.
+    """
+    saved = load_chart_subset(path, kind=kind)
+    if seed is not None and saved.seed != seed:
+        raise ChartSubsetError(f"{kind} seed {saved.seed} != {seed}: {path}")
+    if count is not None and len(saved.charts) != count:
+        raise ChartSubsetError(
+            f"{kind} length {len(saved.charts)} != {count}: {path}"
+        )
+    universe_set = set(universe)
+    missing = [rel for rel in saved.charts if rel not in universe_set]
+    if missing:
+        raise ChartSubsetError(
+            f"{len(missing)} {kind} chart(s) are not in this eval pool: {missing[:20]}"
+        )
+    return saved
 
 
 def load_or_create_chart_subset(
@@ -79,6 +112,7 @@ def load_or_create_chart_subset(
 
     A saved file is not rewritten. Charts in the file must still be in
     ``universe``. Explicit paths, when also passed, must name that same set.
+    Official eval does not use this function.
     """
     path = Path(path)
     universe_set = set(universe)

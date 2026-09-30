@@ -130,6 +130,33 @@ def length_occurrence_profile(seqs: MotifSequences) -> dict:
     }
 
 
+def count_pooled_motifs(
+    notes: list[ManiaNote],
+    timing: CanonicalTiming,
+    vocab: dict[str, set[MotifKey]],
+) -> tuple[dict[str, Counter[MotifKey]], dict[str, int]]:
+    """Sparse pooled counts and observation totals for one chart.
+
+    Lane counts sum the four columns. Hand counts sum raw 12 and mirrored 34.
+    A motif absent from ``vocab`` is not stored; callers that iterate the full
+    vocabulary treat a missing key as count 0.
+    """
+    seqs = MotifSequences.from_notes(notes, timing)
+    lane: Counter[MotifKey] = Counter()
+    for positions in seqs.lane:
+        lane.update(_count_spans(positions, vocab.get("lane", set())))
+    hand: Counter[MotifKey] = Counter()
+    hand.update(_count_spans(seqs.hand["12"], vocab.get("hand", set())))
+    hand.update(_count_spans(seqs.hand["34"], vocab.get("hand", set()), mirror=True))
+    row = _count_spans(seqs.row, vocab.get("row", set()))
+    observations = {
+        "lane": sum(len(positions) for positions in seqs.lane),
+        "hand": len(seqs.hand["12"]) + len(seqs.hand["34"]),
+        "row": len(seqs.row),
+    }
+    return {"lane": lane, "hand": hand, "row": row}, observations
+
+
 def _count_spans(
     positions: list[tuple[int, object]],
     vocab: set[MotifKey],
