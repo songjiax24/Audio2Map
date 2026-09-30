@@ -403,6 +403,7 @@ def generate_window_decode(
     vocab: dict[str, int] | None = None,
     id_to_token: dict[int, str] | None = None,
     constrain: bool = True,
+    cache_audio: bool = True,
 ) -> WindowDecode:
     """Generate one window. Legality of sampled tokens is judged before ``observe``.
 
@@ -431,10 +432,16 @@ def generate_window_decode(
 
     audio_b = audio.unsqueeze(0).to(device)
     cond_b = cond_vec.unsqueeze(0).to(device)
+    window_state = None
+    if cache_audio and hasattr(model, "start_window_decode"):
+        window_state = model.start_window_decode(audio_b, cond_b)
 
     while not state.finished and len(token_ids) < cap:
         ids = torch.tensor([token_ids], dtype=torch.long, device=device)
-        logits = model.next_token_logits(audio_b, cond_b, ids)[0]
+        if window_state is None:
+            logits = model.next_token_logits(audio_b, cond_b, ids)[0]
+        else:
+            logits = model.window_next_logits(window_state, ids)[0]
         allowed = state.allowed_token_ids()
         if constrain:
             next_id = sample_next_token_id(logits, allowed, decode)
@@ -472,6 +479,7 @@ def generate_window_tokens(
     vocab: dict[str, int] | None = None,
     id_to_token: dict[int, str] | None = None,
     constrain: bool = True,
+    cache_audio: bool = True,
 ) -> list[int]:
     """Generate one window token sequence (including BOS/EOS).
 
@@ -498,6 +506,7 @@ def generate_window_tokens(
         vocab=vocab,
         id_to_token=id_to_token,
         constrain=constrain,
+        cache_audio=cache_audio,
     )
     if constrain and decoded.status != "valid":
         raise RuntimeError(decoded.detail or f"window decode {decoded.status}")
@@ -522,6 +531,7 @@ def generate_chart_notes(
     build_grid_if_missing: bool = True,
     on_progress: Callable[[int, int], None] | None = None,
     constrain: bool = True,
+    cache_audio: bool = True,
 ) -> tuple[list[ManiaNote], GenerationReport]:
     """Generate notes for a chart; default range is full audio (``audio_full``).
 
@@ -626,6 +636,7 @@ def generate_chart_notes(
             vocab=vocab,
             id_to_token=id_to_token,
             constrain=constrain,
+            cache_audio=cache_audio,
         )
         if not constrain and decoded.status != "valid":
             report.chart_validity = decoded.status

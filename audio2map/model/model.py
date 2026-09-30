@@ -208,6 +208,24 @@ class AudioChartModel(nn.Module):
             audio_mask=audio_mask,
         )[:, -1, :]
 
+    def start_window_decode(
+        self,
+        audio: torch.Tensor,
+        cond_vec: torch.Tensor,
+        *,
+        audio_mask: torch.Tensor | None = None,
+    ):
+        """Encode one audio window once for autoregressive decoding."""
+        from audio2map.model.decode_cache import start_window_decode
+
+        return start_window_decode(self, audio, cond_vec, audio_mask=audio_mask)
+
+    def window_next_logits(self, state, token_ids: torch.Tensor) -> torch.Tensor:
+        """Next-token logits using a window cache from :meth:`start_window_decode`."""
+        from audio2map.model.decode_cache import window_next_logits
+
+        return window_next_logits(self, state, token_ids)
+
     def checkpoint_model_cfg(self) -> dict:
         return {
             "architecture": self.architecture,
