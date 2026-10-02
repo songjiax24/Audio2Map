@@ -130,7 +130,7 @@ All entries accept `--config <yaml>` for defaults; CLI flags override the file.
 
 Pipeline scripts (not installed entry points): `python -m scripts.collect.cli`,
 `scripts/run_formal_pipeline.sh`, `scripts/train_debug_overfit.py`,
-`scripts/batch_pack_osz.py`.
+`scripts/batch_pack_osz.py`, `scripts/v0_baseline_report.py`.
 
 Diagnostic tools live in `tools/` (run as plain scripts): `analyze_dataset.py`,
 `analyze_timing.py`, `analyze_row_token_stats.py`, `analyze_tick_quantization.py`,
