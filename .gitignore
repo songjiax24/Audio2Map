@@ -28,6 +28,9 @@ chart_meta/
 checkpoint/
 .local-data/
 
+# Regenerable analysis dumps (never commit)
+exports/
+
 # Data & artifacts (live on data disk, never commit)
 *.mp3
 *.ogg
