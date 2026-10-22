@@ -34,6 +34,26 @@ Consequences:
 
 Do not cross-wire semantics. Changing lane/x parsing in one without the other (and without tests) will desync `cond_vec` analyzer dims from chart notes.
 
+## v0 and v1 timing and audio
+
+v0 training, export, and eligibility still use `osu/parser.py` (`parse_timing_points` truncates `offset_ms` to `int` and requires eight fields) and `features/audio/loader.py` (libsndfile first, ffmpeg if that fails). v1 does not call those two for timing or PCM.
+
+`Redline` in `osu/v1/timing.py` is the v1 uninherited timing point (a red line). It is not `TimingPoint`: v0 still stores `offset_ms` as `int` and requires eight fields.
+
+v1 authority, until a later task replaces the v0 path:
+
+| Concern | Module |
+|---------|--------|
+| Red lines (`Redline`, not `TimingPoint`) | `audio2map/osu/v1/timing.py` |
+| Chart reject reasons | `audio2map/utils/errors.py` |
+| Beat grid and V80 cells | `audio2map/grid/v1/` (`positions.py` holds `V80_DENS`) |
+| Labels, vocab, cursor, codec | `audio2map/tokens/v1/` (`encode_chart`, not v0 `encode_notes`) |
+| Illegal token | `audio2map/tokens/errors.py` |
+| Decode, resample, log-mel | `audio2map/features/audio/v1/` (`frame_index` is a mel frame) |
+| Stem convolution | `audio2map/model/audio_stem.py` |
+
+`T_audio` for v1 is `len(y) / sample_rate * 1000` on the PCM from `decode_audio`. There is no second duration via `soundfile.info`. `eval/v1_backend.py` is the v0 eval adapter. It is not this tokenizer, and this round does not rename that file.
+
 ## One sample builder
 
 [`audio2map/dataset/sample.py`](../audio2map/dataset/sample.py) exposes the single

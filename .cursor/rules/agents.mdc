@@ -1,0 +1,16 @@
+---
+description: Project standard for Audio2Map. Read AGENTS.md before editing.
+alwaysApply: true
+---
+
+# Follow AGENTS.md
+
+`AGENTS.md` at the repo root is the standard for new and v1 code. It is not a
+request to copy v0, and it is not permission to restyle v0 outside the task.
+
+- Keep the import layers in `AGENTS.md`. One behavior, one implementation.
+- Put transitional v1 code in `osu/v1`, `grid/v1`, `features/audio/v1`, `tokens/v1`.
+- `ChartRejected` is chart-level (`utils/errors.py`).
+  `IllegalTokenError` is a bad token (`tokens/errors.py`).
+- A trainable block is an `nn.Module` under `model/`. Mel stays in `features/audio/v1`.
+- Do not commit or push unless the user asks. Update `docs/v1_design.md` when a design rule changes.
