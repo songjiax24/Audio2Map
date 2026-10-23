@@ -76,8 +76,7 @@ the stem convolution.
 ## Tools, scripts, tests
 
 `tools/analyze_*.py` and `tools/compute_*.py` are repo diagnostics: shebang,
-argparse, `audio2map` imports. `scripts/` is the data pipeline. Local analysis
-that imports `scripts/analysis/` stays untracked.
+argparse, `audio2map` imports. `scripts/` is the data pipeline.
 
 Tests mirror the package (`tests/osu/v1/`, `tests/grid/v1/`, …). A refactor may
 move a test. It may not make an assertion accept more cases or fewer cases
@@ -89,4 +88,4 @@ Do not leave the module table pointing at paths that do not exist.
 ## Git
 
 Do not commit, push, or move a tag unless the user asks. Do not commit
-`exports/`, `.local-data/`, or `scripts/analysis/`.
+`exports/` or `.local-data/`.

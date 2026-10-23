@@ -174,7 +174,7 @@ k* = round((t_red − s_i) / L_i)
 - 分母集合 `D = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 24, 32}`（因数封闭的 A′ 方案）。
 - 位置为既约分数 `p = j/d`，`0 ≤ j < d`，`gcd(j, d) = 1`，共 **80** 个（`0/1` 记作 d=1）。
 - 各分母格点数：1:1, 2:1, 3:2, 4:2, 5:4, 6:2, 7:6, 8:4, 9:6, 10:4, 12:4, 14:6, 16:8, 18:6, 24:8, 32:16，合计 80。
-- 注：有一条早期记录漏写了 18；以本节和 `scripts/v80_formal_label_counts.py` 的 `DENS` 为准，含 18。
+- 注：有一条早期记录漏写了 18；以本节和 `grid/v1/positions.py` 的 `V80_DENS` 为准，含 18。
 - 位置格点时间：`a_{i,k} + p·L_i`，`p ∈ [0, 1)`。残拍中只保留时间 `< t_red − EPS` 的格点（2.5）。
 - 没有单独的慢速 BPM 词表。
 
@@ -292,6 +292,7 @@ k* = round((t_red − s_i) / L_i)
   - μ、σ 是固定常数：在训练集上用固定 seed 抽样（如 50 首）统计 `ln(mel + 1e-5)` 的全局均值和标准差，算一次后写死在代码里，带版本号（如 `MEL_NORM_V1`），并记录计算脚本和抽样方式。做法类似 Whisper 的固定仿射 `(x + 4) / 4`。
   - 依据：50 首歌统计中 mel 值 72.5% 小于 1、中位数 0.247，`log1p` 会压扁这部分；`ln(mel + 1e-5)` 范围约 −11.5 到 8、中位数约 −1.4，stem 前没有 LayerNorm，因此需要固定仿射把输入调到大致零均值、单位方差（`exports/mel_energy_stats/`）。
 - Stem（Whisper 风格）：`Conv1d(128→512, k=3, s=1, p=1)` + GELU，`Conv1d(512→512, k=3, s=2, p=1)` + GELU，输出约 86 Hz。
+- Stem 放在 `V1ChartModel` 里，和后面的 transformer 一起训练，梯度回传到卷积。数据管道交给模型的是归一化 mel，不在组装时 new 一个随机 stem，也不把 `detach` 后的行当作默认可训输入。`AudioStem.rows` / `stem_span` 只用于离线核对。已经算好的 stem 行必须标 `precomputed=True`，这条路径不更新 stem。
 - 音频 token 间隔 `Δt = 256000/22050 ms ≈ 11.61 ms`；全局 token 下标 `g` 的中心时间 `t(g) = g·Δt`，`g=0` 对应物理时间 0。
 - stem 之后**不加 LayerNorm**，**不用** Whisper 的绝对位置编码。
 - v0 的 `compute_tick_grid_features`（按 tick 插值对齐）不复用。
@@ -343,14 +344,39 @@ k* = round((t_red − s_i) / L_i)
 - 对照方案：512/512 对称窗口【可选】。
 - RoPE base θ = 10000（标准值）。是否调整列为【待定】。
 
-### 6.6 Condition 与 AdaLN-Zero【已锁定】
+### 6.6 Condition 与 AdaLN-Zero【已锁定，10-22 / 10-23】
 
-- 条件向量 x 的具体字段【待定】。当前候选：v0 `features/cond/vec.py` 的 18 维去掉 `canonical_bpm_norm`，剩 17 维：`osu_sr_norm`、8 个 analyzer 比例、8 个 etterna 指标（顺序与 v0 `COND_VEC_NAMES[:17]` 相同，归一化沿用 `build_cond_vec`）。实现时字段列表写成可配置，下面的维数随字段数变化。
-- 缺失值：`z = [x ⊙ m; m]`（m 为可用性 mask），按当前候选共 34 维；MLP `34 → 256 → 256` 得到 `c ∈ R^256`。不用 learned missing embedding，不做字段级拆分。
-- v0 缺字段时直接抛 `CondVecError`；v1 要改为用 mask 表示。
-- 每个 decoder 子层（SA、CA、FFN）各自由 c 产生 `γ, β, α`；`α` 零初始化（AdaLN-Zero）。条件因此会影响 cross-attention 的 query。
-- Condition **不进入** audio encoder。
-- 训练时模拟条件缺失（mask 的分布）属于训练协议【待定】。
+路径沿用已锁定的做法：条件只进 decoder。`z = [x ⊙ m; m]` 经 MLP 得到 `c`，再由 `c` 做 AdaLN-Zero。Encoder 不看 condition。去掉 `canonical_bpm_norm`。v0 缺字段时抛 `CondVecError`；v1 用 mask 表示缺失，不用 learned missing embedding，不做字段级拆分。
+
+- 每个 decoder 子层（SA、CA、FFN）各自由 `c` 产生 `γ, β, α`；`α` 零初始化（AdaLN-Zero）。条件因此会影响 cross-attention 的 query。
+- `x` 固定 18 维，`COND_VEC_VERSION = 3`。旧的 2 号向量不能和这版混用。MLP 输入是 36 维（18 维数值接 18 维 mask），隐藏层 `36 → 256 → 256`，得到 `c ∈ R^256`。隐藏宽度沿用本节原先的 256。
+
+| 下标 | 字段 | 取值 |
+|---|---|---|
+| 1 | `official_sr_norm` | `clip(official_sr / 10, 0, 1.5)` |
+| 2 | `rework_sr_norm` | `clip(rework_sr / 10, 0, 1.5)`。ReworkSR 按 OD=8 重算，忽略谱面 OD；与导出 `OverallDifficulty:8` 一致 |
+| 3–10 | 八维 `msd_*_norm` | `clip(msd / 40, 0, 1.5)`，与 MinaCalc / LeoBlack 的 MSD skillset 一一对应 |
+| 11 | `ln_percent` | 分析器给出的 hold 头占比，范围 `[0, 1]`，不再做 `/10` 或 `/40` |
+| 12 | `hb_row_ratio` | 同一行里同时有 hold 头和普通音符的行占比，范围 `[0, 1]`，不再做 `/10` 或 `/40` |
+| 13–18 | 六维 CorePattern 时间份额 | 见下 |
+
+- 八维 MSD 的顺序：overall、stream、jumpstream、handstream、stamina、jack speed、chordjack、technical。
+- 六维 CorePattern 的顺序与 vendored 分析器的 `CorePattern` 枚举一致：Stream、Chordstream、Jacks、Coordination、Density、Wildcard。每一维是该类全部 `FoundPattern` 的 `[Start, End]` 做经典区间并集，再除以 `LastNote − FirstNote`，然后单维 clip 到 `[0, 1]`。只截这一维，六维之和仍可大于 1，不 renorm。用 Amount 时间份额，不用 Importance。不做 RC 过滤、BPM 过滤、prune、top-3，也不把簇的 Amount 加总。
+- 跨类可以重叠，所以六维之和可以大于 1；没被任何模式盖住的时间不补进去，所以也可以小于 1。不做 renorm。`LastNote − FirstNote` 小于等于 0 或不是有限数时，这六维记为缺失（`m_real = 0`）。
+- 同一张谱只 parse 一次、只 `find` 一次。这一次搜索同时给出 v0 的簇 Importance（`core_dist`，语义不变，仍给卡片和 Category）和 v1 的六维份额。方案 A 不写进 `from_chart` 的卡片裁剪。
+- 分析器来源：LeoBlackMT toolchain，仓库内路径 `features/cond/pattern_analyser`。
+- 明确不进入条件向量：ModeTag、Category、SVAmount、Importance、BPM / beatLength、谱面 OD、`canonical_bpm_norm`。
+- 官方 SR、Rework SR 和 MSD 的归一化与 v0 相同：先除以 10 或 40，再 `clip` 到 `[0, 1.5]`。上界 1.5 是保险上限，不是这些量的物理上限。
+
+训练时的可用性 mask 用 Composer 风格，先抽模式，再与真实缺失取交：
+
+- 以 0.10 的概率全留：抽到的 `m = 1`。
+- 以 0.10 的概率全空：抽到的 `m = 0`。
+- 其余 0.80 的概率下，每一维独立 Bernoulli，`p_keep = 0.5`。
+- 始终做 `m ← m ∧ m_real`。真实缺失的维不能被打开。
+- Pattern 六维可以各自丢掉，丢掉之后不做 renorm。v1 不做把这六维绑在一起的 block-drop；若以后需要再单列。
+- v1 不要求 classifier-free guidance。全空样本已经覆盖无条件输入。
+- 组装默认 `cond_mask="none"`：`cond_m = m_real`，已有的维不会被随机抹掉。训练要显式传 `cond_mask="train"`，才按上面的 Composer 分布抽样，并与 `m_real` 取交。验证和冒烟走默认。
 
 ---
 
@@ -369,7 +395,14 @@ k* = round((t_red − s_i) / L_i)
 
 ### 7.3 待定事项
 
-- 训练样本方式：整首歌 / 切块 / 滑动窗口【待定，写数据管线前必须决定】。BeatGrid、打标签、tokenizer 与此无关，可以先实现。
+- 训练样本方式【暂定，2026-10-22】。BeatGrid、打标签、tokenizer 与此无关，可以先实现。
+  - 硬目标并列，没有先后：贴音频；整曲的难度和风格一致；hold 与句法合法、可玩；在 RTX 5090 上能够训练，且吞吐可接受。让训练和推理接近，是达到这些目标的手段，不是单独的目标。
+  - 语义上的默认：一张谱和它对应的音频是一条序列。不把 v0 那种彼此独立的音频 crop 与谱面 crop 当作默认。
+  - 候选的启发顺序是 A → C → D，不是已经锁定的实现。
+    - A：整首 teacher forcing。
+    - C：音频尽量按整段做前向；loss 只算 target 窗；decoder 的前缀用真实 token。截断反向传播，或在前缀上 detach，由实验决定。
+    - D：在 C 之上再加 audio halo。只有中心段是有效目标；crop 的边缘不是歌曲时间轴上的静音；RoPE 使用全局帧下标 `g`。
+  - 下面几项由实验裁定，和 R2（cross-attention 训练显存）以及训练试点绑在一起：A 在 5090 上是否跑得动；完整前向加局部反向是否优于把前向也裁短；什么情况从 A 退到 C，或再退到 D；halo 取多长；长谱上的梯度如何加权。
 - Cross-attention 的训练显存策略（不分块、按层重算、FlexAttention 等）【待定，先做 benchmark】。benchmark 需覆盖长音频、不同 token 长度与 batch size，测前向和反向的峰值显存与单步时间；推理时每层预先投影整段 K/V，再按窗口 gather（已定）。
 - 数据增强方案【待定，可最后决定】：候选包括变速，以及 4K 左右镜像（把 ROW 的轨道顺序反过来，实现简单）等。
 - Decoder 1024 窗口与 8/8 层数是否足够【待定，看实验】。
@@ -432,10 +465,10 @@ k* = round((t_red − s_i) / L_i)
 
 待定（不影响 BeatGrid / 打标签 / tokenizer 的实现）：
 
-1. 训练样本方式（整首 / 切块 / 滑动窗口）。
+1. 训练样本方式【暂定，2026-10-22】：默认一张谱加对应音频为一条序列；候选启发序为 A（整首 teacher forcing）→ C（尽量长的音频前向，loss 在 target 窗，decoder 前缀用真实 token）→ D（再加 audio halo）。是否跑得动、退到 C/D 的触发、halo 长度和长谱梯度权重由实验裁定，与 R2 及训练试点一起做。细则见 7.3。BeatGrid、打标签、tokenizer 与此无关。
 2. Cross-attention 训练显存策略（benchmark 后定）。
 3. 数据增强方案（变速、左右镜像等）。
-4. RoPE base、condition 字段与 mask 分布、decoder 窗口与层数是否足够。
+4. RoPE base、decoder 窗口与层数是否足够。condition 字段与 mask 分布见 §6.6。
 5. 是否加入非法 token 概率质量的辅助惩罚（【可选】，不做 masked CE）。
 6. 推理采样策略（资料中没有）。
 
@@ -449,8 +482,8 @@ k* = round((t_red − s_i) / L_i)
 
 - 分支 `master`，最新提交 `767ae06`（`.gitignore` 加入 `exports/`；其前一个为 `3440698` v0 baseline 报告）。实现前先在此提交打 tag `v0-final`。仓库已重构为分层包，依赖方向由 import-linter 强制：
   `cli → eval → train → generate → dataset → model → features → metrics → tokens → grid → osu → utils`。
-- **v1 已有的部分**（未提交）：红线、BeatGrid、V80 打标签、v1 tokenizer、ffmpeg+soxr 解码与 log-mel、`model/audio_stem.py`。数据集窗口、训练、导出、条件向量和 8 层模型还没有。`eval/v1_backend.py` 仍是 v0 评测适配器壳子，不是 v1 tokenizer。
-- 分析脚本（原 WSL `/tmp/a2m_*.py`，共 24 个）已复制到仓库目录 `scripts/analysis/`，导入路径已改为本地目录。它们与 `scripts/v80_formal_label_counts.py` 都不进 git（写在 `.git/info/exclude`）；`exports/` 已写入 `.gitignore`（提交 `767ae06`）。这些脚本只用于核对数字，不是 v1 正式代码。另有一部分旧脚本在 `C:\Users\32279\a2m_*.py`。
+- **v1 已有的部分**：红线、BeatGrid（含 `phase_at`）、V80 打标签、v1 tokenizer、ffmpeg+soxr 解码与 log-mel、`model/audio_stem.py`（由 `V1ChartModel` 持有并端到端训练）、`features/cond/v1`（18 维条件与 ReworkSR）、`model/v1`（8/8）、`dataset/v1`（整首谱 → 带 mel 的 `V1Batch`）。整首 V1Batch 组装已实现；R1 窗策略仍待 R2 与训练试点。训练循环、导出还没有。`eval/v1_backend.py` 仍是 v0 评测适配器壳子，不是 v1 tokenizer。
+- 核对第 9 节用过的一次性计数脚本已从工作树去掉（原先的 `scripts/analysis/` 与 `scripts/v80_formal_label_counts.py`）。基准数字仍以第 9 节和 `exports/floor_d64/` 为准。`exports/` 在 `.gitignore`（提交 `767ae06`）。这些脚本不是 v1 代码。
 - `docs/` 只有 `ARCHITECTURE.md`、`chart_tokens.md`（v0 token 说明）、`data_collection.md`。本文件建议放在 `docs/v1_design.md`。
 
 ### 11.2 可复用
@@ -459,7 +492,7 @@ k* = round((t_red − s_i) / L_i)
 |---|---|---|
 | `osu/parser.py` | 读 `.osu` 分节、`is_mania_4k`、`parse_notes`、`x_to_column` | v0 的 `parse_timing_points` / `TimingPoint` 保持原样。v1 红线在 `osu/v1/timing.py`，类型是 `Redline`，不是 `TimingPoint` |
 | `tokens/vocab.py` | `LaneState`、`is_legal_row`、`apply_row`、`is_event_row` | 可复用；v1 词表（693）的组织方式由实现决定 |
-| `features/cond/vec.py` | 条件字段与归一化 | v1 去掉 BPM 维并加 mask |
+| `features/cond/vec.py` | v0 条件字段与归一化 | v1 不改这个文件。v1 向量在 `features/cond/v1/` |
 | `dataset/split.py` | `beatmapset_v1` 划分 | 直接用 |
 | `model/rotary.py` | RoPE | 需支持小数位置 |
 | `osu/export.py` | 写 `.osu` 的外壳 | 时间与红线规则按第 8 节，注意 `filter_notes_for_export` 会静默丢事件 |
@@ -475,7 +508,7 @@ v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`Can
 | `audio2map/utils/errors.py` | `ChartRejected` 与一一对应的拒绝原因 |
 | `audio2map/osu/v1/timing.py` | float64 红线（`Redline`，不是 v0 `TimingPoint`）；`offset` 与 `beatLength` 必填，缺 `meter` 用 4 |
 | `audio2map/utils/tolerance.py` | `EPS`、`TIE` 只定义这一处 |
-| `audio2map/grid/v1/beatgrid.py` | BeatGrid（第 2 节）。拍范围是 `coverage_start_ms` / `coverage_end_ms` |
+| `audio2map/grid/v1/beatgrid.py` | BeatGrid（第 2 节）。拍范围是 `coverage_start_ms` / `coverage_end_ms`。`phase_at(t)` 给出 φ 和全局拍序号 |
 | `audio2map/grid/v1/positions.py` | `V80_DENS` 与 80 个格子 |
 | `audio2map/tokens/errors.py` | `IllegalTokenError` |
 | `audio2map/tokens/v1/labels.py` | V80 窗口打标签（第 3 节） |
@@ -483,11 +516,16 @@ v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`Can
 | `audio2map/tokens/v1/state.py` | 状态机（`Cursor.beat_id`）与解码约束（第 4、5 节） |
 | `audio2map/tokens/v1/structure.py` | 端点、音频范围、重复格、hold 顺序 |
 | `audio2map/tokens/v1/codec.py` | `encode_chart` / `decode_tokens` |
+| `audio2map/tokens/v1/cursor_time.py` | `cursor_times_ms`，与 `token_ids[:-1]` 对齐，由 `tokens.v1` 导出 |
 | `audio2map/features/audio/v1/` | ffmpeg+ffprobe 解码、拒绝检测、重采样、log-mel。帧下标是 `frame_index` |
-| `audio2map/model/audio_stem.py` | stem 卷积（`nn.Module`），`STEM_CHANNELS` 在这里 |
+| `audio2map/model/audio_stem.py` | stem 卷积（`nn.Module`）。训练时挂在 `V1ChartModel` 上。`rows()` 是离线 detach |
+| `audio2map/features/cond/v1/` | 18 维条件、Composer mask、ReworkSR、CorePattern Amount 份额 |
+| `audio2map/model/v1/batch.py` | `V1Batch`。dataset 组装，model 消费 |
+| `audio2map/model/v1/` | 8/8 encoder-decoder、AdaLN-Zero、φ/ψ、plain CE、可训 stem |
+| `audio2map/dataset/v1/` | 整首谱组装成一条带 mel 的 `V1Batch`（策略 A）。默认 `cond_mask="none"` |
 | `tests/` 下与包同构的 `v1/` | 单元测试 |
 
-还没写、本轮不建：`beat_phase.py`、`cond/v1_vec.py`、`dataset/v1_filter.py`、8 层 `model`、`generate/v1_*.py`。
+整首 V1Batch 组装已实现；R1 窗策略仍待 R2 与训练试点。训练循环和导出还没写。
 
 原则：
 
