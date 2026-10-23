@@ -14,13 +14,7 @@ from audio2map.features.audio.v1.constants import (
     N_MELS,
     SAMPLE_RATE,
 )
-from audio2map.features.audio.v1.mel import (
-    buffer_sample_range,
-    frame_index,
-    mel_power,
-    normalize_mel,
-    slice_pcm,
-)
+from audio2map.features.audio.v1.mel import mel_span
 
 STEM_CHANNELS = 512
 
@@ -51,7 +45,7 @@ class AudioStem(nn.Module):
         return hidden[:, :, 1:-1].transpose(1, 2)
 
     def rows(self, mel: np.ndarray) -> np.ndarray:
-        """``mel`` is ``(n_mels, frames)``. Returns ``(S, channels)`` float32."""
+        """Detached CPU rows for offline checks. Training does not call this."""
         if int(mel.shape[1]) < 3:
             return np.zeros((0, STEM_CHANNELS), dtype=np.float32)
         tensor = torch.from_numpy(np.ascontiguousarray(mel, dtype=np.float32)).unsqueeze(0)
@@ -68,15 +62,9 @@ def stem_span(
     mu: float = MEL_NORM_MU,
     sigma: float = MEL_NORM_SIGMA,
 ) -> StemBatch:
-    """Stem tokens for ``[t_lo, t_hi)``. The same ``g`` matches a full-song run."""
-    if t_hi_ms <= t_lo_ms:
-        frame_lo = frame_index(t_lo_ms)
+    """Offline stem rows. The copy is detached and is not a training batch."""
+    span = mel_span(y, t_lo_ms, t_hi_ms, sample_rate=sample_rate, mu=mu, sigma=sigma)
+    if span.mel.shape[1] == 0:
         empty = np.zeros((0, STEM_CHANNELS), dtype=np.float32)
-        return StemBatch(empty, frame_lo, frame_lo)
-    frame_lo = frame_index(t_lo_ms)
-    frame_hi = frame_index(t_hi_ms)
-    if frame_hi < frame_lo:
-        frame_hi = frame_lo
-    start, end = buffer_sample_range(frame_lo, frame_hi)
-    normed = normalize_mel(mel_power(slice_pcm(y, start, end), sample_rate), mu=mu, sigma=sigma)
-    return StemBatch(stem.rows(normed), frame_lo, frame_hi)
+        return StemBatch(empty, span.frame_lo, span.frame_hi)
+    return StemBatch(stem.rows(span.mel), span.frame_lo, span.frame_hi)

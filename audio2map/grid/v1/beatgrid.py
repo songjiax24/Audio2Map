@@ -8,6 +8,7 @@ residual beat and is kept at any length. Grid points on that beat at or after
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass
 
 from audio2map.grid.v1.positions import v80_cells
@@ -90,6 +91,32 @@ class BeatGrid:
 
     def beat_has_legal_point(self, beat_id: int) -> bool:
         return len(self.points[beat_id]) > 0
+
+    def phase_at(self, t_ms: float) -> tuple[float, int]:
+        """φ in ``[0, 1)`` and the global beat index at ``t_ms``.
+
+        The beat is the last stored beat that starts at or before ``t_ms``,
+        chosen by index order. φ divides by that beat's nominal length
+        ``L_i``, including a residual beat. A time on the next beat start
+        belongs to that next beat with φ = 0.
+        """
+        if not math.isfinite(t_ms):
+            raise ValueError(f"t_ms is not finite: {t_ms}")
+        if not self.beats:
+            raise ValueError("beat grid has no beats")
+        first = self.beats[0]
+        if t_ms <= first.start_ms:
+            return 0.0, first.global_b
+        if t_ms >= self.coverage_end_ms:
+            return 0.0, self.beats[-1].global_b + 1
+        starts = [beat.start_ms for beat in self.beats]
+        beat = self.beats[bisect_right(starts, t_ms) - 1]
+        phi = (t_ms - beat.start_ms) / beat.nominal_length_ms
+        if phi < 0.0:
+            return 0.0, beat.global_b
+        if phi >= 1.0:
+            return math.nextafter(1.0, 0.0), beat.global_b
+        return phi, beat.global_b
 
 
 def _near_duplicate_pairs(redlines: tuple[Redline, ...]) -> tuple[tuple[float, float], ...]:

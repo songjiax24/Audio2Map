@@ -10,6 +10,7 @@ from audio2map.tokens.v1.codec import (
     encode_parsed,
     endpoints_from_notes,
 )
+from audio2map.tokens.v1.cursor_time import cursor_times_ms
 from audio2map.tokens.v1.vocab import TOKENIZER_VERSION, build_vocab
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "Endpoint",
     "EndpointKind",
     "build_vocab",
+    "cursor_times_ms",
     "decode_tokens",
     "encode_chart",
     "encode_parsed",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -79,3 +80,39 @@ def normalize_mel(
         raise ValueError("mel norm sigma is 0")
     logged = np.log(np.asarray(mel, dtype=np.float64) + MEL_FLOOR)
     return ((logged - mu) / sigma).astype(np.float32)
+
+
+@dataclass(frozen=True, slots=True)
+class MelSpan:
+    """Normalized mel for stem frames ``frame_lo .. frame_hi-1``.
+
+    ``mel`` is ``(n_mels, 2S+3)`` when ``S = frame_hi - frame_lo`` is positive.
+    """
+
+    mel: np.ndarray
+    frame_lo: int
+    frame_hi: int
+
+
+def mel_span(
+    y: np.ndarray,
+    t_lo_ms: float,
+    t_hi_ms: float,
+    *,
+    sample_rate: int = SAMPLE_RATE,
+    mu: float = MEL_NORM_MU,
+    sigma: float = MEL_NORM_SIGMA,
+) -> MelSpan:
+    """Mel for ``[t_lo, t_hi)``. The same ``g`` matches a full-song run."""
+    frame_lo = frame_index(t_lo_ms)
+    frame_hi = frame_index(t_hi_ms)
+    if frame_hi <= frame_lo:
+        empty = np.zeros((N_MELS, 0), dtype=np.float32)
+        return MelSpan(empty, frame_lo, frame_lo)
+    start, end = buffer_sample_range(frame_lo, frame_hi)
+    normed = normalize_mel(
+        mel_power(slice_pcm(y, start, end), sample_rate),
+        mu=mu,
+        sigma=sigma,
+    )
+    return MelSpan(normed, frame_lo, frame_hi)
