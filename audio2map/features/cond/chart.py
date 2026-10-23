@@ -9,12 +9,21 @@ from pathlib import Path
 
 from audio2map.features.cond.minacalc import compute_msd
 from audio2map.features.cond.official_sr import official_star_rating
-from audio2map.features.cond.patterns import analyze_chart_patterns
 from audio2map.grid import CanonicalTiming
 from audio2map.osu.parser import parse_beatmap
 from audio2map.utils.paths import chart_meta_dir
 
 logger = logging.getLogger(__name__)
+
+
+class ChartMetaVersionError(ValueError):
+    """A saved chart-meta record is not the current v1 condition vector."""
+
+
+def _v1_cond_version() -> int:
+    from audio2map.features.cond.v1.vec import COND_VEC_VERSION
+
+    return COND_VEC_VERSION
 
 
 @dataclass(slots=True)
@@ -23,6 +32,7 @@ class ChartMeta:
     beatmap_id: int | None = None
     canonical_bpm: float | None = None
     official_sr: float | None = None
+    rework_sr: float | None = None
     msd_overall: float | None = None
     msd_stream: float | None = None
     msd_jumpstream: float | None = None
@@ -39,13 +49,27 @@ class ChartMeta:
     analyzer_coordination: float | None = None
     analyzer_density: float | None = None
     analyzer_wildcard: float | None = None
+    pattern_stream: float | None = None
+    pattern_chordstream: float | None = None
+    pattern_jacks: float | None = None
+    pattern_coordination: float | None = None
+    pattern_density: float | None = None
+    pattern_wildcard: float | None = None
     error: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data["cond_vec_version"] = _v1_cond_version()
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> ChartMeta:
+        expected = _v1_cond_version()
+        version = data.get("cond_vec_version")
+        if version != expected:
+            raise ChartMetaVersionError(
+                f"cond_vec_version {version!r} != {expected}"
+            )
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in fields})
 
@@ -68,6 +92,14 @@ def compute_chart_meta(path: Path | str) -> ChartMeta:
         except Exception as exc:
             errors.append(f"official_sr: {exc}")
 
+        rework: float | None = None
+        try:
+            from audio2map.features.cond.v1.rework import rework_star_rating
+
+            rework = rework_star_rating(path)
+        except Exception as exc:
+            errors.append(f"rework_sr: {exc}")
+
         msd = None
         try:
             msd = compute_msd(beatmap)
@@ -76,9 +108,27 @@ def compute_chart_meta(path: Path | str) -> ChartMeta:
 
         pat = None
         core: dict[str, float | None] = {}
+        pattern_names = (
+            "Stream",
+            "Chordstream",
+            "Jacks",
+            "Coordination",
+            "Density",
+            "Wildcard",
+        )
+        amounts: dict[str, float | None] = {name: None for name in pattern_names}
         try:
-            pat = analyze_chart_patterns(path)
+            from audio2map.features.cond.v1.patterns import (
+                PATTERN_ORDER,
+                analyze_patterns_once,
+            )
+
+            passed = analyze_patterns_once(path)
+            pat = passed.features
             core = pat.core_dist
+            if passed.pattern_amounts is not None:
+                for name, value in zip(PATTERN_ORDER, passed.pattern_amounts, strict=True):
+                    amounts[name] = float(value)
         except Exception as exc:
             errors.append(f"analyzer: {exc}")
 
@@ -87,6 +137,7 @@ def compute_chart_meta(path: Path | str) -> ChartMeta:
             beatmap_id=beatmap.metadata.beatmap_id,
             canonical_bpm=canon.canonical_bpm,
             official_sr=sr,
+            rework_sr=rework,
             msd_overall=msd.overall if msd else None,
             msd_stream=msd.stream if msd else None,
             msd_jumpstream=msd.jumpstream if msd else None,
@@ -103,6 +154,12 @@ def compute_chart_meta(path: Path | str) -> ChartMeta:
             analyzer_coordination=core.get("Coordination"),
             analyzer_density=core.get("Density"),
             analyzer_wildcard=core.get("Wildcard"),
+            pattern_stream=amounts["Stream"],
+            pattern_chordstream=amounts["Chordstream"],
+            pattern_jacks=amounts["Jacks"],
+            pattern_coordination=amounts["Coordination"],
+            pattern_density=amounts["Density"],
+            pattern_wildcard=amounts["Wildcard"],
             error="; ".join(errors) if errors else None,
         )
     except Exception as exc:
@@ -126,7 +183,7 @@ def load_chart_meta_manifest(path: Path | None = None) -> dict[str, ChartMeta]:
                 rec = json.loads(line)
                 meta = ChartMeta.from_dict(rec)
                 out[str(Path(meta.osu_path).resolve())] = meta
-            except (json.JSONDecodeError, TypeError, KeyError) as exc:
+            except (json.JSONDecodeError, TypeError, KeyError, ChartMetaVersionError) as exc:
                 logger.warning("skip manifest line %d: %s", line_no, exc)
     logger.info("loaded %d chart meta records from %s", len(out), manifest_path)
     return out

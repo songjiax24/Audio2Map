@@ -44,11 +44,8 @@ def _core_distribution(clusters) -> dict[str, float]:
     return {k: v / total for k, v in totals.items()}
 
 
-def analyze_osu(path: Path | str) -> PatternFeatures:
-    """Analyze pattern features for a mania .osu file."""
-    path = Path(path)
-    chart = parse_osu_mania(str(path))
-    report = from_chart(chart)
+def features_from_report(report) -> PatternFeatures:
+    """v0 card features. ``core_dist`` is normalized cluster Importance."""
     return PatternFeatures(
         ln_percent=float(report.LNPercent),
         hb_row_ratio=float(report.HBRowRatio),
@@ -56,3 +53,10 @@ def analyze_osu(path: Path | str) -> PatternFeatures:
         mode_tag=str(report.ModeTag),
         category=str(report.Category),
     )
+
+
+def analyze_osu(path: Path | str) -> PatternFeatures:
+    """Analyze pattern features for a mania .osu file."""
+    path = Path(path)
+    chart = parse_osu_mania(str(path))
+    return features_from_report(from_chart(chart))

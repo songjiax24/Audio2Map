@@ -75,12 +75,13 @@ def _resolve_mode_tag(ln_ratio: float, hb_ratio: float) -> str:
     return "Mix"
 
 
-def from_chart(chart) -> PatternReport:
+def from_chart(chart, found=None) -> PatternReport:
     ln_ratio = ln_percent(chart)
     hb_ratio = _hb_row_ratio(chart)
     mode_tag = _resolve_mode_tag(ln_ratio, hb_ratio)
 
-    patterns = find(chart)
+    # ``found`` is an existing ``find(chart)`` result. The card omits it.
+    patterns = find(chart) if found is None else found
     if mode_tag == "RC":
         patterns = [p for p in patterns if p.Pattern not in LN_CORE_PATTERNS]
 

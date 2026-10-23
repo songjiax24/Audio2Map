@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from audio2map.features.cond import ChartMeta, compute_chart_meta
+from audio2map.features.cond.chart import ChartMetaVersionError, load_chart_meta_manifest
 from audio2map.features.cond.minacalc import compute_msd
 from audio2map.features.cond.official_sr import official_star_rating
 from audio2map.osu.parser import parse_beatmap
@@ -98,6 +100,7 @@ def test_chart_meta_from_dict_ignores_unknown_keys() -> None:
             "analyzer_coordination": 0.05,
             "analyzer_density": 0.1,
             "analyzer_wildcard": 0.05,
+            "cond_vec_version": 3,
         }
     )
     assert "hold_ratio" not in meta.to_dict()
@@ -108,3 +111,25 @@ def test_chart_meta_from_dict_ignores_unknown_keys() -> None:
     assert "version" not in meta.to_dict()
     assert meta.canonical_bpm == 180.0
     assert meta.official_sr == 3.5
+    assert meta.to_dict()["cond_vec_version"] == 3
+
+
+def test_from_dict_rejects_a_different_cond_version() -> None:
+    with pytest.raises(ChartMetaVersionError):
+        ChartMeta.from_dict({"osu_path": "old.osu", "pattern_stream": 0.9})
+    with pytest.raises(ChartMetaVersionError):
+        ChartMeta.from_dict({"osu_path": "old.osu", "cond_vec_version": 1, "pattern_stream": 0.9})
+
+
+def test_manifest_skips_a_record_from_another_version(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.jsonl"
+    old = {"osu_path": "old.osu", "cond_vec_version": 1, "pattern_stream": 0.9}
+    current = {"osu_path": "new.osu", "cond_vec_version": 3, "official_sr": 2.0}
+    path.write_text(json.dumps(old) + "\n" + json.dumps(current) + "\n", encoding="utf-8")
+    loaded = load_chart_meta_manifest(path)
+    assert len(loaded) == 1
+    meta = next(iter(loaded.values()))
+    assert meta.osu_path == "new.osu"
+    assert meta.official_sr == 2.0
+    assert meta.pattern_stream is None
+    assert meta.error is None

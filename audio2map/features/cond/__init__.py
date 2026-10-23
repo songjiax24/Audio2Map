@@ -1,4 +1,8 @@
-"""Chart conditions: the per-chart table and the 18-d model vector."""
+"""Chart conditions: the per-chart table and the v0 18-d vector.
+
+``COND_VEC_VERSION`` here is the v0 vector (1). v1 uses
+``audio2map.features.cond.v1.COND_VEC_VERSION``.
+"""
 
 from audio2map.features.cond.chart import ChartMeta, compute_chart_meta, load_chart_meta_manifest
 from audio2map.features.cond.patterns import PatternFeatures, analyze_chart_patterns

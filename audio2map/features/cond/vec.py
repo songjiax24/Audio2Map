@@ -8,6 +8,7 @@ from audio2map.features.cond.chart import ChartMeta
 from audio2map.grid import canonicalize_bpm
 
 COND_VEC_DIM = 18
+# v0 layout. The v1 vector lives in features.cond.v1 and keeps its own version.
 COND_VEC_VERSION = 1
 
 # Fixed index map — do not reorder without bumping COND_VEC_VERSION.
