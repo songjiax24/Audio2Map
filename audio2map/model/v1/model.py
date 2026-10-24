@@ -9,13 +9,21 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from audio2map.features.audio.v1.constants import DT_MS
 from audio2map.features.cond.v1.vec import COND_MLP_HIDDEN, COND_MLP_IN, COND_VEC_DIM
 from audio2map.model.audio_stem import STEM_CHANNELS, AudioStem
 from audio2map.model.v1.batch import V1Batch
 from audio2map.model.v1.blocks import DecoderLayer, EncoderLayer
 from audio2map.model.v1.constants import D_MODEL, N_LAYERS, PHASE_DIM, PHI_HARMONICS
-from audio2map.model.v1.windows import cross_allow, decoder_allow, encoder_allow
+from audio2map.model.v1.cross import (
+    CA_TRAIN_FLEX,
+    CA_TRAIN_LEGACY,
+    CrossLog,
+    bucket_length,
+    flex_compiled,
+    normalize_ca_train,
+    prepare_flex,
+)
+from audio2map.model.v1.windows import cross_allow, cross_positions
 from audio2map.tokens.v1.vocab import build_vocab
 
 
@@ -53,7 +61,7 @@ class V1ChartModel(nn.Module):
     when the batch carries mel.
     """
 
-    def __init__(self, vocab_size: int | None = None, stem: AudioStem | None = None) -> None:
+    def __init__(self, vocab_size: int | None = None, stem: AudioStem | None = None, ca_train: str = CA_TRAIN_FLEX) -> None:
         super().__init__()
         self.vocab_size = vocab_size if vocab_size is not None else len(build_vocab())
         self.stem = stem if stem is not None else AudioStem()
@@ -64,6 +72,23 @@ class V1ChartModel(nn.Module):
         self.decoder = nn.ModuleList(DecoderLayer(COND_MLP_HIDDEN) for _ in range(N_LAYERS))
         self.lm_head = nn.Linear(D_MODEL, self.vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight
+        self.ca_train = CA_TRAIN_FLEX
+        self.last_cross: CrossLog | None = None
+        self.cross_history: list[CrossLog] = []
+        self._cross_buckets: set[tuple[int, int]] = set()
+        self.set_ca_train(ca_train)
+
+    def set_ca_train(self, mode: str) -> None:
+        """``flex`` (default) or ``legacy`` dense bool mask. Not a checkpoint field."""
+        self.ca_train = normalize_ca_train(mode)
+        for layer in self.decoder:
+            layer.cross_attn.train_mode = self.ca_train
+
+    def _note_cross(self, log: CrossLog) -> None:
+        self.last_cross = log
+        self.cross_history.append(log)
+        if len(self.cross_history) > 16:
+            del self.cross_history[:-16]
 
     def encode(
         self,
@@ -76,11 +101,9 @@ class V1ChartModel(nn.Module):
             raise ValueError(f"stem width {channels} != {D_MODEL}")
         local = torch.arange(length, device=audio.device)
         positions = frame_lo.to(device=audio.device).unsqueeze(1) + local
-        allow = encoder_allow(length, audio.device).unsqueeze(0)
-        allow = allow & audio_mask[:, None, :]
         hidden = audio
         for layer in self.encoder:
-            hidden = layer(hidden, positions, allow)
+            hidden = layer(hidden, positions, audio_mask)
         return hidden
 
     def _audio_rows(self, batch: V1Batch) -> torch.Tensor:
@@ -135,15 +158,54 @@ class V1ChartModel(nn.Module):
         beat_b = batch.beat_b.to(device=device)
         context = memory + self.phase(phase_fourier(phi, beat_b))
 
-        g = batch.frame_lo.to(device=device).unsqueeze(1) + torch.arange(length, device=device)
-        g = g.to(dtype=context.dtype)
+        g, p_q = cross_positions(batch.frame_lo, length, batch.cursor_time_ms.to(device=device))
         q_len = tokens.shape[1]
         positions = torch.arange(q_len, device=device)
-        self_allow = decoder_allow(q_len, device).unsqueeze(0).expand(batch_size, q_len, q_len)
         if batch.token_mask is not None:
-            self_allow = self_allow & batch.token_mask.to(device=device)[:, None, :]
-        p_q = batch.cursor_time_ms.to(device=device, dtype=context.dtype) / DT_MS
-        cross_ok = cross_allow(g, p_q) & audio_mask[:, None, :]
+            token_keep = batch.token_mask.to(device=device)
+        else:
+            token_keep = torch.ones(batch_size, q_len, dtype=torch.bool, device=device)
+        if self.ca_train == CA_TRAIN_FLEX and context.is_cuda:
+            bucket = (bucket_length(q_len), bucket_length(length))
+            plan, log = prepare_flex(
+                p_q,
+                g,
+                audio_mask,
+                compiled=flex_compiled(context),
+                bucket_hit=bucket in self._cross_buckets,
+            )
+            self._cross_buckets.add(bucket)
+            cross_arg: torch.Tensor | object = plan
+        elif self.ca_train == CA_TRAIN_FLEX:
+            bucket = (bucket_length(q_len), bucket_length(length))
+            hit = bucket in self._cross_buckets
+            self._cross_buckets.add(bucket)
+            cross_arg = cross_allow(g, p_q) & audio_mask[:, None, :]
+            log = CrossLog(
+                impl=CA_TRAIN_FLEX,
+                compiled=False,
+                q_len=q_len,
+                kv_len=length,
+                q_bucket=bucket[0],
+                kv_bucket=bucket[1],
+                bucket_hit=hit,
+                fallback="cpu-dense",
+            )
+        elif self.ca_train == CA_TRAIN_LEGACY:
+            cross_arg = cross_allow(g, p_q) & audio_mask[:, None, :]
+            log = CrossLog(
+                impl=CA_TRAIN_LEGACY,
+                compiled=False,
+                q_len=q_len,
+                kv_len=length,
+                q_bucket=q_len,
+                kv_bucket=length,
+                bucket_hit=False,
+                fallback="",
+            )
+        else:
+            raise ValueError(f"unknown ca_train {self.ca_train!r}")
+        self._note_cross(log)
 
         hidden = self.token_emb(tokens.to(device=device))
         cond = self.cond(
@@ -152,5 +214,5 @@ class V1ChartModel(nn.Module):
         )
         k_pos = g
         for layer in self.decoder:
-            hidden = layer(hidden, cond, positions, self_allow, context, p_q, k_pos, cross_ok)
+            hidden = layer(hidden, cond, positions, token_keep, context, p_q, k_pos, cross_arg)
         return self.lm_head(hidden)

@@ -2,13 +2,25 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
-from audio2map.model.v1.blocks import SelfAttention
+import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from audio2map.model.v1.blocks import SelfAttention, _fill_empty, _sdpa_mask, _zero_empty
 from audio2map.model.v1.constants import D_MODEL, N_LAYERS
 from audio2map.model.v1.loss import plain_ce
 from audio2map.model.v1.model import V1Batch, V1ChartModel
-from audio2map.model.v1.windows import cross_allow, decoder_allow, encoder_allow
+from audio2map.model.v1.windows import (
+    DECODER_WINDOW,
+    ENCODER_WINDOW,
+    cross_allow,
+    decoder_allow,
+    decoder_keeps,
+    encoder_allow,
+    encoder_keeps,
+)
 from audio2map.tokens.v1.vocab import TOKEN_PAD, build_vocab
 
 
@@ -32,16 +44,89 @@ def test_cross_window_drops_keys_outside_the_past_and_future() -> None:
     assert allowed == [False, False, True, True, True, False]
 
 
-def test_true_mask_keeps_the_key() -> None:
+def _band(length: int, query: int, window: tuple[int, int]) -> torch.Tensor:
+    left, right = window
+    key = torch.arange(length)
+    return (key >= query - left) & (key <= query + right)
+
+
+def test_flash_window_is_the_allow_set() -> None:
+    assert ENCODER_WINDOW == (512, 511)
+    assert DECODER_WINDOW == (1023, 0)
+    enc = encoder_allow(2000, torch.device("cpu"))
+    for query in (0, 10, 600, 1999):
+        got = _band(2000, query, ENCODER_WINDOW)
+        assert torch.equal(got, enc[query])
+        assert torch.equal(got, encoder_keeps(torch.tensor(query), torch.arange(2000)))
+    assert int(_band(2000, 600, ENCODER_WINDOW).sum()) == 1024
+    dec = decoder_allow(1030, torch.device("cpu"))
+    for query in (0, 5, 1024, 1029):
+        got = _band(1030, query, DECODER_WINDOW)
+        assert torch.equal(got, dec[query])
+        assert torch.equal(got, decoder_keeps(torch.tensor(query), torch.arange(1030)))
+        assert int(got.sum()) <= 1024
+    assert int(_band(1030, 1024, DECODER_WINDOW).sum()) == 1024
+
+
+def test_prefix_visibility_changes_the_output_and_holes_fail() -> None:
     torch.manual_seed(0)
-    attn = SelfAttention()
-    x = torch.randn(1, 2, D_MODEL)
-    positions = torch.arange(2)
-    both = torch.ones(1, 2, 2, dtype=torch.bool)
-    only_self = torch.tensor([[[True, False], [False, True]]])
-    mixed = attn(x, positions, both)
-    kept = attn(x, positions, only_self)
-    assert not torch.allclose(mixed, kept)
+    attn = SelfAttention(ENCODER_WINDOW)
+    x = torch.randn(1, 8, D_MODEL)
+    positions = torch.arange(8)
+    full = torch.ones(1, 8, dtype=torch.bool)
+    tail = torch.ones(1, 8, dtype=torch.bool)
+    tail[0, 6:] = False
+    assert not torch.allclose(attn(x, positions, full), attn(x, positions, tail))
+    hole = full.clone()
+    hole[0, 3] = False
+    with pytest.raises(ValueError, match="valid prefix"):
+        attn(x, positions, hole)
+
+
+def _dense_bool_forward(attn: SelfAttention, x: torch.Tensor, positions: torch.Tensor, allow: torch.Tensor) -> torch.Tensor:
+    """Retired full-sequence bool mask, kept only as the numeric control."""
+    batch, length, _ = x.shape
+    q = attn.q_proj(x).view(batch, length, attn.n_heads, attn.head_dim).transpose(1, 2)
+    k = attn.k_proj(x).view(batch, length, attn.n_heads, attn.head_dim).transpose(1, 2)
+    v = attn.v_proj(x).view(batch, length, attn.n_heads, attn.head_dim).transpose(1, 2)
+    q = attn.rotary.apply(q, positions)
+    k = attn.rotary.apply(k, positions)
+    usable, empty = _fill_empty(allow)
+    with sdpa_kernel(SDPBackend.MATH):
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=_sdpa_mask(usable))
+    out = _zero_empty(out, empty)
+    out = out.transpose(1, 2).contiguous().view(batch, length, D_MODEL)
+    return attn.out_proj(out)
+
+
+@pytest.mark.parametrize(
+    ("window", "keeps"),
+    [(ENCODER_WINDOW, encoder_keeps), (DECODER_WINDOW, decoder_keeps)],
+)
+def test_sliding_window_matches_dense_bool_mask(window: tuple[int, int], keeps) -> None:
+    torch.manual_seed(0)
+    length = 48
+    lengths = torch.tensor([30, length])
+    query = torch.arange(length)[:, None]
+    key = torch.arange(length)[None, :]
+    visible = (key[None] < lengths[:, None, None]) & (query[None] < lengths[:, None, None])
+    allow = keeps(query, key)[None] & visible
+    attn = SelfAttention(window)
+    x = torch.randn(2, length, D_MODEL)
+    positions = torch.arange(length)
+    keep = torch.arange(length)[None, :] < lengths[:, None]
+    left = x.detach().requires_grad_(True)
+    right = x.detach().requires_grad_(True)
+    got = attn(left, positions, keep)
+    attn.zero_grad(set_to_none=True)
+    got.sum().backward()
+    got_weight = attn.q_proj.weight.grad.detach().clone()
+    attn.zero_grad(set_to_none=True)
+    ref = _dense_bool_forward(attn, right, positions, allow)
+    ref.sum().backward()
+    assert (got - ref).abs().max() < 1e-4
+    assert (left.grad - right.grad).abs().max() < 1e-4
+    assert (got_weight - attn.q_proj.weight.grad).abs().max() < 1e-4
 
 
 def test_fake_batch_backward() -> None:

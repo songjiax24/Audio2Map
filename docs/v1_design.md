@@ -403,7 +403,7 @@ k* = round((t_red − s_i) / L_i)
     - C：音频尽量按整段做前向；loss 只算 target 窗；decoder 的前缀用真实 token。截断反向传播，或在前缀上 detach，由实验决定。
     - D：在 C 之上再加 audio halo。只有中心段是有效目标；crop 的边缘不是歌曲时间轴上的静音；RoPE 使用全局帧下标 `g`。
   - 下面几项由实验裁定，和 R2（cross-attention 训练显存）以及训练试点绑在一起：A 在 5090 上是否跑得动；完整前向加局部反向是否优于把前向也裁短；什么情况从 A 退到 C，或再退到 D；halo 取多长；长谱上的梯度如何加权。
-- Cross-attention 的训练显存策略（不分块、按层重算、FlexAttention 等）【待定，先做 benchmark】。benchmark 需覆盖长音频、不同 token 长度与 batch size，测前向和反向的峰值显存与单步时间；推理时每层预先投影整段 K/V，再按窗口 gather（已定）。
+- Cross-attention 训练默认 FlexAttention + 动态 BlockMask（`mask_mod` 读每个 query 的 `c_t`，并与可见音频取交）【已锁定，2026-10-24】。开关是 `V1ChartModel(ca_train="flex"|"legacy")`，默认 `flex`。`legacy` 才是原来的 dense bool mask，不是默认。Flex 把 Q/KV 长度按 128 向上取整分桶，只为了编译形状，不改采样；每次前向把真实长度和桶记在 `last_cross`。Flex 没有 CPU 反向，CPU 上同一次配置改走 dense mask，并在 `last_cross.fallback` 写 `cpu-dense`。推理仍是每层预先投影整段 K/V 并做 RoPE，再按每个 query 自己的 `c_t` 窗口取键（不是并集）：连续下标用切片，只有可见范围把窗口打成不连续时才 `torch.gather`，然后无 mask 的 SDPA。`g` 与 `c_t` 保持整数或 fp32，不收成 bf16。
 - 数据增强方案【待定，可最后决定】：候选包括变速，以及 4K 左右镜像（把 ROW 的轨道顺序反过来，实现简单）等。
 - Decoder 1024 窗口与 8/8 层数是否足够【待定，看实验】。
 - 优化器、学习率、batch 大小等资料里没有，属于实现时的普通配置。
