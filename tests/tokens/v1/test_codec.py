@@ -116,6 +116,21 @@ def test_every_encode_state_has_a_legal_token() -> None:
             assert legal_tokens(cursor, encoded.grid)
 
 
+def test_step_reuses_a_supplied_legal_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    encoded = encode_chart([ManiaNote(0, 0, NoteType.TAP)], [_rl(0.0, 500.0)], 1500.0)
+    cursor = initial_cursor()
+    allowed = legal_tokens(cursor, encoded.grid)
+    token = encoded.tokens[1]
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError("step must reuse the supplied legal set")
+
+    monkeypatch.setattr("audio2map.tokens.v1.state.legal_tokens", _refuse)
+    before = (cursor.beat_id, cursor.expect_row, cursor.finished)
+    step(cursor, token, encoded.grid, allowed=allowed)
+    assert (cursor.beat_id, cursor.expect_row, cursor.finished) != before
+
+
 def test_illegal_token_does_not_move_the_cursor() -> None:
     encoded = encode_chart([ManiaNote(0, 0, NoteType.TAP)], [_rl(0.0, 500.0)], 1500.0)
     cursor = initial_cursor()

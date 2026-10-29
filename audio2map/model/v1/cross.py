@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
 
 from audio2map.model.v1.constants import CROSS_FUTURE, CROSS_PAST, D_MODEL
 from audio2map.model.v1.windows import _as_long_index, _floor_index
@@ -23,6 +23,8 @@ CA_TRAIN_FLEX = "flex"
 CA_TRAIN_LEGACY = "legacy"
 BUCKET = 128
 _WINDOW = CROSS_PAST + CROSS_FUTURE
+# A 512-key window starts mid-block and then covers five blocks of 128.
+_BLOCKS_PER_QUERY = (_WINDOW + BUCKET - 2) // BUCKET + 1
 _PLAN: list[FlexPlan | None] = [None]
 _COMPILED: list = []
 
@@ -129,6 +131,63 @@ def _compiled_flex():
     return _COMPILED[0]
 
 
+def _ordered_block_index(grid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Present blocks first, matching Flex's ``(kv_num_blocks, kv_indices)``."""
+    dense = grid.to(dtype=torch.int32)
+    count = dense.sum(dim=-1)
+    index = torch.argsort(dense, dim=-1, descending=True, stable=True)
+    return count.to(dtype=torch.int32), index.to(dtype=torch.int32)
+
+
+def _block_mask(plan: FlexPlan, kv_len: int) -> BlockMask:
+    """Tiles each query window meets. Every touched block stays partial.
+
+    ``g`` is ``frame_lo + arange`` on the unpadded prefix, so each query is one
+    index interval of at most 512 keys. Empty queries, including the bucket
+    tail, also touch block 0. ``mask_mod`` drops holes, edges, and the dummy key.
+    """
+    floor_c = plan.floor_c
+    origin = plan.g_pad[:, :1]
+    visible = plan.visible[:, :kv_len]
+    batch, queries = floor_c.shape
+    prefix = visible.to(dtype=torch.int32).cumsum(dim=1)
+    prefix = F.pad(prefix, (1, 0))
+    lo = (floor_c - CROSS_PAST - origin).clamp(0, kv_len)
+    hi = (floor_c + CROSS_FUTURE - origin).clamp(0, kv_len)
+    keep = plan.q_keep
+    blank = torch.zeros_like(lo)
+    lo = torch.where(keep, lo, blank)
+    hi = torch.where(keep, hi, blank)
+    n_qb = plan.q_bucket // BUCKET
+    n_kb = plan.kv_bucket // BUCKET
+    grid = torch.zeros(batch, 1, n_qb, n_kb, dtype=torch.int32, device=floor_c.device)
+    query_block = torch.arange(queries, device=floor_c.device) // BUCKET
+    query_block = query_block.view(1, queries).expand(batch, queries)
+    rows = torch.arange(batch, device=floor_c.device)[:, None].expand(batch, queries)
+    for offset in range(_BLOCKS_PER_QUERY):
+        block = lo // BUCKET + offset
+        left = torch.maximum(lo, block * BUCKET)
+        right = torch.minimum(hi, (block + 1) * BUCKET)
+        seen = prefix.gather(1, right.clamp(0, kv_len))
+        seen = seen - prefix.gather(1, left.clamp(0, kv_len))
+        valid = keep & (lo < hi) & (right > left) & (seen > 0)
+        valid = valid & (block >= 0) & (block < n_kb)
+        grid[rows[valid], 0, query_block[valid], block[valid]] = 1
+    empty = plan.empty_pad
+    dummy = torch.zeros(batch, queries, dtype=torch.long, device=floor_c.device)
+    grid[rows[empty], 0, query_block[empty], dummy[empty]] = 1
+    count, index = _ordered_block_index(grid)
+    return BlockMask.from_kv_blocks(
+        count,
+        index,
+        None,
+        None,
+        BLOCK_SIZE=BUCKET,
+        mask_mod=_mask_mod,
+        seq_lengths=(plan.q_bucket, plan.kv_bucket),
+    )
+
+
 def _pad_tail(value: torch.Tensor, length: int, fill: float | bool | int) -> torch.Tensor:
     extra = length - value.shape[1]
     if extra <= 0:
@@ -144,7 +203,11 @@ def prepare_flex(
     compiled: bool,
     bucket_hit: bool,
 ) -> tuple[FlexPlan, CrossLog]:
-    """One BlockMask for every decoder layer. Empty queries get a dummy key."""
+    """One BlockMask for every decoder layer. Empty queries get a dummy key.
+
+    The block list is those 128-wide tiles. ``mask_mod`` is not evaluated on the
+    full Q×KV grid.
+    """
     _batch, q_len = c_t.shape
     kv_len = g.shape[1]
     q_bucket = bucket_length(q_len)
@@ -168,14 +231,7 @@ def prepare_flex(
         empty_pad=empty_pad,
     )
     _PLAN[0] = plan
-    plan.block = create_block_mask(
-        _mask_mod,
-        c_t.shape[0],
-        1,
-        q_bucket,
-        kv_bucket,
-        device=c_t.device,
-    )
+    plan.block = _block_mask(plan, kv_len)
     log = CrossLog(
         impl=CA_TRAIN_FLEX,
         compiled=compiled,

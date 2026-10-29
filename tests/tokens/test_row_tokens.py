@@ -29,6 +29,7 @@ from audio2map.utils.paths import raw_data_available, raw_dir
 
 def test_vocab_size() -> None:
     assert len(build_vocab()) == 4 + 192 + 625  # specials + POS + ROW
+    assert build_vocab() is build_vocab()
 
 
 def test_spec_hold_active_example() -> None:

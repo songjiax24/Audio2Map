@@ -8,11 +8,11 @@ import warnings
 import pytest
 import torch
 
-from audio2map.features.audio.v1.constants import DT_MS
+from audio2map.features.audio.v1.constants import DT_MS, N_MELS
 from audio2map.features.cond.v1.vec import COND_VEC_DIM
 from audio2map.model.v1.blocks import CrossAttention
 from audio2map.model.v1.constants import D_MODEL
-from audio2map.model.v1.cross import bucket_length, window_slots
+from audio2map.model.v1.cross import BUCKET, _mask_mod, bucket_length, prepare_flex, window_slots
 from audio2map.model.v1.decode import _read_window, gather_cross, teacher_decode
 from audio2map.model.v1.loss import plain_ce
 from audio2map.model.v1.model import V1Batch, V1ChartModel
@@ -33,8 +33,10 @@ def _batch(frames: int, steps: int, batch: int = 1, frame_lo: int = 0) -> V1Batc
         cursor_time_ms=cursor,
         phi=torch.rand(batch, frames),
         beat_b=torch.zeros(batch, frames),
-        audio=torch.randn(batch, frames, D_MODEL),
-        precomputed=True,
+        log_bpm=torch.zeros(batch, frames),
+        rel_u=torch.zeros(batch, frames),
+        mel=torch.randn(batch, N_MELS, 2 * frames + 3),
+        n_frames=torch.full((batch,), frames, dtype=torch.long),
     )
 
 
@@ -134,6 +136,40 @@ def test_flex_matches_legacy_with_a_visibility_hole() -> None:
     assert (flex.k_proj.weight.grad - dense.k_proj.weight.grad).abs().max() < 1e-4
 
 
+def _window_blocks(plan) -> torch.Tensor:
+    batch = plan.floor_c.shape[0]
+    queries, keys = plan.q_bucket, plan.kv_bucket
+    b = torch.arange(batch)[:, None, None]
+    q = torch.arange(queries)[None, :, None]
+    k = torch.arange(keys)[None, None, :]
+    elements = _mask_mod(b, 0, q, k)
+    q_blocks, k_blocks = queries // BUCKET, keys // BUCKET
+    reduced = elements.view(batch, q_blocks, BUCKET, k_blocks, BUCKET)
+    return reduced.any(dim=(2, 4))[:, None]
+
+
+def test_block_mask_is_the_tiles_the_window_meets() -> None:
+    frames, queries = 700, 40
+    origin = torch.tensor([[40], [7]], dtype=torch.long)
+    g = origin + torch.arange(frames)
+    c_t = torch.linspace(40.0, 40.0 + frames - 1, queries).unsqueeze(0).repeat(2, 1).clone()
+    c_t[0, 0] = 295.0
+    c_t[0, 3] = -50.0
+    c_t[1] = torch.linspace(7.0 + frames - 1, 7.0, queries)
+    audio = torch.ones(2, frames, dtype=torch.bool)
+    audio[:, 80:90] = False
+    audio[1, 400:] = False
+    plan, _log = prepare_flex(c_t, g, audio, compiled=False, bucket_hit=False)
+    got = plan.block.to_dense().to(dtype=torch.bool)
+    assert plan.block.full_kv_num_blocks is None
+    assert torch.equal(got, _window_blocks(plan))
+    flipped = c_t.flip(1).contiguous()
+    flipped[1, 1] = -20.0
+    again, _log = prepare_flex(flipped, g, audio, compiled=False, bucket_hit=True)
+    assert again.block.full_kv_num_blocks is None
+    assert torch.equal(again.block.to_dense().to(dtype=torch.bool), _window_blocks(again))
+
+
 def test_contiguous_cross_window_is_a_slice() -> None:
     cache = torch.randn(1, 2, 32, 4)
     span = torch.arange(4, 12)
@@ -222,8 +258,10 @@ def test_bf16_training_window_matches_the_integer_index(monkeypatch: pytest.Monk
         cursor_time_ms=queries.unsqueeze(0) * DT_MS,
         phi=batch.phi,
         beat_b=batch.beat_b,
-        audio=batch.audio,
-        precomputed=True,
+        log_bpm=batch.log_bpm,
+        rel_u=batch.rel_u,
+        mel=batch.mel,
+        n_frames=batch.n_frames,
     )
     device = torch.device("cuda")
     batch = V1Batch(
@@ -234,8 +272,10 @@ def test_bf16_training_window_matches_the_integer_index(monkeypatch: pytest.Monk
         cursor_time_ms=batch.cursor_time_ms.to(device),
         phi=batch.phi.to(device),
         beat_b=batch.beat_b.to(device),
-        audio=batch.audio.to(device),
-        precomputed=True,
+        log_bpm=batch.log_bpm.to(device),
+        rel_u=batch.rel_u.to(device),
+        mel=batch.mel.to(device),
+        n_frames=batch.n_frames.to(device),
     )
     seen: dict[str, torch.Tensor] = {}
     import audio2map.model.v1.cross as cross_mod
@@ -283,8 +323,10 @@ def test_cuda_train_step_uses_flex_and_decode_is_flash(caplog: pytest.LogCapture
         cursor_time_ms=batch.cursor_time_ms.to(device),
         phi=batch.phi.to(device),
         beat_b=batch.beat_b.to(device),
-        audio=batch.audio.to(device),
-        precomputed=True,
+        log_bpm=batch.log_bpm.to(device),
+        rel_u=batch.rel_u.to(device),
+        mel=batch.mel.to(device),
+        n_frames=batch.n_frames.to(device),
     )
     model.train()
     with torch.autocast("cuda", dtype=torch.bfloat16):

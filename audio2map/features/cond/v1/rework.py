@@ -464,13 +464,48 @@ def _rescale_high(star: float) -> float:
     return 9.0 + (star - 9.0) / 1.2
 
 
-def rework_star_rating(path: Path | str) -> float:
-    """Return the NM Rework star for a mania 4K ``.osu`` file."""
+def _scale_ms(time_ms: int, speed_rate: float) -> int:
+    """Positive milliseconds, half-up. ``speed_rate=1`` does not call this."""
+    return int(math.floor(float(time_ms) / speed_rate + 0.5))
+
+
+def _at_speed(
+    notes: list[tuple[int, int, int]],
+    speed_rate: float,
+) -> tuple[list[list[tuple[int, int, int]]], list[tuple[int, int, int]]]:
+    """Divide event times by ``speed_rate``. Holds that collapse stay 1 ms long."""
+    scaled: list[tuple[int, int, int]] = []
+    for col, start, tail in notes:
+        new_start = _scale_ms(start, speed_rate)
+        if tail < 0:
+            scaled.append((col, new_start, -1))
+            continue
+        new_tail = _scale_ms(tail, speed_rate)
+        if new_tail <= new_start:
+            new_tail = new_start + 1
+        scaled.append((col, new_start, new_tail))
+    scaled.sort(key=lambda item: (item[1], item[0]))
+    columns: list[list[tuple[int, int, int]]] = [[] for _ in range(_KEYS)]
+    for note in scaled:
+        columns[note[0]].append(note)
+    return columns, scaled
+
+
+def rework_star_rating(path: Path | str, *, speed_rate: float = 1.0) -> float:
+    """Rework star for a mania 4K chart. OD stays 8.
+
+    ``speed_rate`` is the clock. ``1`` leaves the file times untouched.
+    Any other rate divides millisecond times before the same NM strain.
+    """
+    if not math.isfinite(speed_rate) or speed_rate <= 0.0:
+        raise ReworkSRError(f"speed_rate must be positive and finite, got {speed_rate}")
     path = Path(path)
     x = _hit_leniency(REWORK_COND_OD)
     if not math.isfinite(x) or x <= 0.0:
         raise ReworkSRError(f"hit leniency is not positive: {path}")
     columns, notes = _note_columns(path)
+    if speed_rate != 1.0:
+        columns, notes = _at_speed(notes, speed_rate)
     tails = [note[2] for note in notes]
     end_time = max(max(note[1] for note in notes), max(tails)) + 1
     if end_time < 2:

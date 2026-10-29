@@ -1,7 +1,6 @@
-"""§6 chart model. Training stems mel inside this module.
+"""§6 chart model. The encoder's forward takes normalized mel.
 
-``precomputed=True`` skips the stem and reads detached rows. That path does
-not train ``AudioStem``.
+The conv stem is the front of ``AudioEncoder``. Phase is added to its output.
 """
 
 from __future__ import annotations
@@ -10,10 +9,11 @@ import torch
 from torch import nn
 
 from audio2map.features.cond.v1.vec import COND_MLP_HIDDEN, COND_MLP_IN, COND_VEC_DIM
-from audio2map.model.audio_stem import STEM_CHANNELS, AudioStem
+from audio2map.model.audio_stem import AudioStem
 from audio2map.model.v1.batch import V1Batch
-from audio2map.model.v1.blocks import DecoderLayer, EncoderLayer
+from audio2map.model.v1.blocks import DecoderLayer
 from audio2map.model.v1.constants import D_MODEL, N_LAYERS, PHASE_DIM, PHI_HARMONICS
+from audio2map.model.v1.encoder import AudioEncoder, run_layer
 from audio2map.model.v1.cross import (
     CA_TRAIN_FLEX,
     CA_TRAIN_LEGACY,
@@ -27,15 +27,28 @@ from audio2map.model.v1.windows import cross_allow, cross_positions
 from audio2map.tokens.v1.vocab import build_vocab
 
 
-def phase_fourier(phi: torch.Tensor, beat_b: torch.Tensor) -> torch.Tensor:
-    """φ harmonics k=1..8 and ψ = (b + φ) / 2 at k=1. Last dim is 18."""
+def phase_fourier(
+    phi: torch.Tensor,
+    beat_b: torch.Tensor,
+    log_bpm: torch.Tensor,
+    rel_u: torch.Tensor,
+) -> torch.Tensor:
+    """φ k=1..8, ψ k=1, then log BPM and u. Last dim is 20.
+
+    ``log_bpm`` and ``rel_u`` are already sampled at the same frame time as
+    ``phi``. This layer does not look up a redline.
+    """
     harmonics = torch.arange(1, PHI_HARMONICS + 1, device=phi.device, dtype=phi.dtype)
     angle = phi.unsqueeze(-1) * harmonics * (2.0 * torch.pi)
     phi_feat = torch.cat((angle.sin(), angle.cos()), dim=-1)
     psi = (beat_b.to(phi.dtype) + phi) / 2.0
     psi_angle = psi * (2.0 * torch.pi)
     psi_feat = torch.stack((psi_angle.sin(), psi_angle.cos()), dim=-1)
-    return torch.cat((phi_feat, psi_feat), dim=-1)
+    extra = torch.stack(
+        (log_bpm.to(dtype=phi.dtype), rel_u.to(dtype=phi.dtype)),
+        dim=-1,
+    )
+    return torch.cat((phi_feat, psi_feat, extra), dim=-1)
 
 
 class ConditionMLP(nn.Module):
@@ -57,22 +70,27 @@ class ConditionMLP(nn.Module):
 class V1ChartModel(nn.Module):
     """8 encoder layers and 8 decoder layers. The LM head shares the token embedding.
 
-    ``stem`` is a submodule. Pass one instance to share it. Its weights train
-    when the batch carries mel.
+    ``stem`` is the encoder's conv front. Pass one instance to share it.
     """
 
-    def __init__(self, vocab_size: int | None = None, stem: AudioStem | None = None, ca_train: str = CA_TRAIN_FLEX) -> None:
+    def __init__(
+        self,
+        vocab_size: int | None = None,
+        stem: AudioStem | None = None,
+        ca_train: str = CA_TRAIN_FLEX,
+    ) -> None:
         super().__init__()
         self.vocab_size = vocab_size if vocab_size is not None else len(build_vocab())
-        self.stem = stem if stem is not None else AudioStem()
+        self.encoder = AudioEncoder(stem)
         self.token_emb = nn.Embedding(self.vocab_size, D_MODEL)
-        self.encoder = nn.ModuleList(EncoderLayer() for _ in range(N_LAYERS))
         self.phase = nn.Linear(PHASE_DIM, D_MODEL)
         self.cond = ConditionMLP()
         self.decoder = nn.ModuleList(DecoderLayer(COND_MLP_HIDDEN) for _ in range(N_LAYERS))
         self.lm_head = nn.Linear(D_MODEL, self.vocab_size, bias=False)
         self.lm_head.weight = self.token_emb.weight
         self.ca_train = CA_TRAIN_FLEX
+        # Off until the train loop turns it on. Eval never recomputes.
+        self.grad_checkpoint = False
         self.last_cross: CrossLog | None = None
         self.cross_history: list[CrossLog] = []
         self._cross_buckets: set[tuple[int, int]] = set()
@@ -84,61 +102,23 @@ class V1ChartModel(nn.Module):
         for layer in self.decoder:
             layer.cross_attn.train_mode = self.ca_train
 
+    def set_grad_checkpoint(self, enabled: bool) -> None:
+        """Recompute each encoder and decoder layer on the backward pass.
+
+        The weight checkpoint does not store this. The run config does.
+        """
+        self.grad_checkpoint = bool(enabled)
+
     def _note_cross(self, log: CrossLog) -> None:
         self.last_cross = log
         self.cross_history.append(log)
         if len(self.cross_history) > 16:
             del self.cross_history[:-16]
 
-    def encode(
-        self,
-        audio: torch.Tensor,
-        frame_lo: torch.Tensor,
-        audio_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        _batch, length, channels = audio.shape
-        if channels != D_MODEL:
-            raise ValueError(f"stem width {channels} != {D_MODEL}")
-        local = torch.arange(length, device=audio.device)
-        positions = frame_lo.to(device=audio.device).unsqueeze(1) + local
-        hidden = audio
-        for layer in self.encoder:
-            hidden = layer(hidden, positions, audio_mask)
-        return hidden
-
-    def _audio_rows(self, batch: V1Batch) -> torch.Tensor:
-        """Stem mel without detaching, or return an explicitly precomputed cache."""
-        if batch.precomputed:
-            if batch.audio is None:
-                raise ValueError("precomputed batch is missing stem rows")
-            return batch.audio
-        if batch.audio is not None and batch.mel is None:
-            raise ValueError("stem rows require precomputed=True")
-        if batch.mel is None or batch.n_frames is None:
-            raise ValueError("trainable batch needs mel and n_frames")
-        device = self.stem.conv1.weight.device
-        mel = batch.mel.to(device=device)
-        counts = batch.n_frames.to(device=device)
-        width = int(counts.max())
-        parts: list[torch.Tensor] = []
-        for index in range(mel.shape[0]):
-            count = int(counts[index])
-            if count <= 0:
-                raise ValueError("stem span is empty")
-            produced = self.stem(mel[index : index + 1, :, : 2 * count + 3])
-            if produced.shape[1] != count:
-                raise ValueError(f"stem length {produced.shape[1]} != {count}")
-            if count < width:
-                pad = produced.new_zeros(1, width - count, STEM_CHANNELS)
-                produced = torch.cat((produced, pad), dim=1)
-            parts.append(produced)
-        return torch.cat(parts, dim=0)
-
     def forward(self, batch: V1Batch) -> torch.Tensor:
         """Logits ``(B, L-1, vocab)`` for ``token_ids[:, 1:]``."""
-        audio = self._audio_rows(batch)
-        if audio.shape[-1] != D_MODEL:
-            raise ValueError(f"stem width {audio.shape[-1]} != {D_MODEL}")
+        if batch.mel is None or batch.n_frames is None:
+            raise ValueError("trainable batch needs mel and n_frames")
         if batch.cond_x.shape[-1] != COND_VEC_DIM or batch.cond_m.shape[-1] != COND_VEC_DIM:
             raise ValueError("condition must be 18 values and 18 mask dims")
         tokens = batch.token_ids[:, :-1]
@@ -147,16 +127,31 @@ class V1ChartModel(nn.Module):
         if int(tokens.max()) >= self.vocab_size:
             raise ValueError(f"token id {int(tokens.max())} >= vocab {self.vocab_size}")
 
-        batch_size, length, _ = audio.shape
-        device = audio.device
-        if batch.audio_mask is None:
-            audio_mask = torch.ones(batch_size, length, dtype=torch.bool, device=device)
-        else:
-            audio_mask = batch.audio_mask.to(device=device)
-        memory = self.encode(audio, batch.frame_lo.to(device=device), audio_mask)
-        phi = batch.phi.to(device=device, dtype=audio.dtype)
+        recompute = self.training and self.grad_checkpoint
+        memory = self.encoder(
+            batch.mel,
+            batch.frame_lo,
+            batch.audio_mask,
+            n_frames=batch.n_frames,
+            recompute=recompute,
+        )
+        device = memory.device
+        batch_size, length, _ = memory.shape
+        audio_mask = (
+            torch.ones(batch_size, length, dtype=torch.bool, device=device)
+            if batch.audio_mask is None
+            else batch.audio_mask.to(device=device)
+        )
+        phi = batch.phi.to(device=device, dtype=memory.dtype)
         beat_b = batch.beat_b.to(device=device)
-        context = memory + self.phase(phase_fourier(phi, beat_b))
+        context = memory + self.phase(
+            phase_fourier(
+                phi,
+                beat_b,
+                batch.log_bpm.to(device=device),
+                batch.rel_u.to(device=device),
+            )
+        )
 
         g, p_q = cross_positions(batch.frame_lo, length, batch.cursor_time_ms.to(device=device))
         q_len = tokens.shape[1]
@@ -209,10 +204,22 @@ class V1ChartModel(nn.Module):
 
         hidden = self.token_emb(tokens.to(device=device))
         cond = self.cond(
-            batch.cond_x.to(device=device, dtype=audio.dtype),
-            batch.cond_m.to(device=device, dtype=audio.dtype),
+            batch.cond_x.to(device=device, dtype=memory.dtype),
+            batch.cond_m.to(device=device, dtype=memory.dtype),
         )
         k_pos = g
+        recompute = self.training and self.grad_checkpoint
         for layer in self.decoder:
-            hidden = layer(hidden, cond, positions, token_keep, context, p_q, k_pos, cross_arg)
+            hidden = run_layer(
+                layer,
+                hidden,
+                cond,
+                positions,
+                token_keep,
+                context,
+                p_q,
+                k_pos,
+                cross_arg,
+                recompute=recompute,
+            )
         return self.lm_head(hidden)

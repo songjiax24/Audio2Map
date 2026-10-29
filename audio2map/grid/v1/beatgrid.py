@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from audio2map.grid.v1.positions import v80_cells
 from audio2map.utils.errors import (
@@ -88,6 +88,19 @@ class BeatGrid:
     t_audio_ms: float
     cells: tuple[tuple[int, int], ...]
     near_duplicate_pairs: tuple[tuple[float, float], ...]
+    # Built once. ``phase_at`` bisects these instead of rebuilding a list.
+    _starts: tuple[float, ...] = field(init=False, repr=False, compare=False)
+    _nominal_ms: tuple[float, ...] = field(init=False, repr=False, compare=False)
+    _global_b: tuple[int, ...] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_starts", tuple(beat.start_ms for beat in self.beats))
+        object.__setattr__(
+            self,
+            "_nominal_ms",
+            tuple(beat.nominal_length_ms for beat in self.beats),
+        )
+        object.__setattr__(self, "_global_b", tuple(beat.global_b for beat in self.beats))
 
     def beat_has_legal_point(self, beat_id: int) -> bool:
         return len(self.points[beat_id]) > 0
@@ -98,25 +111,82 @@ class BeatGrid:
         The beat is the last stored beat that starts at or before ``t_ms``,
         chosen by index order. φ divides by that beat's nominal length
         ``L_i``, including a residual beat. A time on the next beat start
-        belongs to that next beat with φ = 0.
+        belongs to that next beat with φ = 0. Starts and nominal lengths
+        are the columns cached at construction.
         """
         if not math.isfinite(t_ms):
             raise ValueError(f"t_ms is not finite: {t_ms}")
-        if not self.beats:
+        if not self._starts:
             raise ValueError("beat grid has no beats")
-        first = self.beats[0]
-        if t_ms <= first.start_ms:
-            return 0.0, first.global_b
+        if t_ms <= self._starts[0]:
+            return 0.0, self._global_b[0]
         if t_ms >= self.coverage_end_ms:
-            return 0.0, self.beats[-1].global_b + 1
-        starts = [beat.start_ms for beat in self.beats]
-        beat = self.beats[bisect_right(starts, t_ms) - 1]
-        phi = (t_ms - beat.start_ms) / beat.nominal_length_ms
+            return 0.0, self._global_b[-1] + 1
+        beat_index = bisect_right(self._starts, t_ms) - 1
+        phi = (t_ms - self._starts[beat_index]) / self._nominal_ms[beat_index]
+        beat = self._global_b[beat_index]
         if phi < 0.0:
-            return 0.0, beat.global_b
+            return 0.0, beat
         if phi >= 1.0:
-            return math.nextafter(1.0, 0.0), beat.global_b
-        return phi, beat.global_b
+            return math.nextafter(1.0, 0.0), beat
+        return phi, beat
+
+
+def scale_beatgrid(grid: BeatGrid, rate: float) -> BeatGrid:
+    """Same beats and cells, with every millisecond divided by ``rate``.
+
+    The osu label window is not run again. ``rate=1`` returns ``grid``.
+    """
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise ValueError(f"rate must be positive and finite, got {rate}")
+    if rate == 1.0:
+        return grid
+
+    def scaled(value: float) -> float:
+        return value / rate
+
+    beats = tuple(
+        Beat(
+            section=beat.section,
+            beat_k=beat.beat_k,
+            global_b=beat.global_b,
+            start_ms=scaled(beat.start_ms),
+            section_offset_ms=scaled(beat.section_offset_ms),
+            actual_length_ms=scaled(beat.actual_length_ms),
+            nominal_length_ms=scaled(beat.nominal_length_ms),
+            is_residual=beat.is_residual,
+            t_red_ms=None if beat.t_red_ms is None else scaled(beat.t_red_ms),
+        )
+        for beat in grid.beats
+    )
+    points = tuple(
+        tuple(
+            GridPoint(
+                beat_id=point.beat_id,
+                section=point.section,
+                beat_k=point.beat_k,
+                global_b=point.global_b,
+                numer=point.numer,
+                denom=point.denom,
+                cell=point.cell,
+                time_ms=scaled(point.time_ms),
+            )
+            for point in beat_points
+        )
+        for beat_points in grid.points
+    )
+    pairs = tuple(
+        (scaled(earlier), scaled(later)) for earlier, later in grid.near_duplicate_pairs
+    )
+    return BeatGrid(
+        beats=beats,
+        points=points,
+        coverage_start_ms=scaled(grid.coverage_start_ms),
+        coverage_end_ms=scaled(grid.coverage_end_ms),
+        t_audio_ms=scaled(grid.t_audio_ms),
+        cells=grid.cells,
+        near_duplicate_pairs=pairs,
+    )
 
 
 def _near_duplicate_pairs(redlines: tuple[Redline, ...]) -> tuple[tuple[float, float], ...]:

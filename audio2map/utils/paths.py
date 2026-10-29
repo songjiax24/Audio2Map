@@ -77,6 +77,24 @@ def formal_checkpoint_dir() -> Path:
     return processed_dir() / "checkpoints" / FORMAL_CHECKPOINT_NAME
 
 
+V1_CHECKPOINT_NAME = "v1_chart"
+
+
+def v1_checkpoint_dir() -> Path:
+    """Checkpoints for the v1 whole-chart loop. Not the v0 formal run."""
+    return processed_dir() / "checkpoints" / V1_CHECKPOINT_NAME
+
+
+def v1_length_dir() -> Path:
+    """Rate-1 frame and token counts for v1 batching. Not a split or raw file."""
+    return processed_dir() / "v1_length"
+
+
+def v1_chart_meta_path() -> Path:
+    """Rate-1 v1 ChartMeta jsonl. Not ``chart_meta/manifest.jsonl`` (that file is v0)."""
+    return processed_dir() / "v1_chart_meta" / "manifest.jsonl"
+
+
 def raw_data_available() -> bool:
     """True if ``raw/`` exists and is readable (safe under permission errors)."""
     return _path_is_dir(raw_dir())

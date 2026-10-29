@@ -1,0 +1,29 @@
+# Whole-chart v1 training. audio2map-train-v1 --config configs/train/train_v1.yaml
+# This is not train_multi.yaml. v0 stays on audio2map-train.
+
+max_steps: 200000
+batch_size: 2
+lr: 0.0003
+# 0.01 on parameters with ndim >= 2. Bias and norm are not decayed.
+weight_decay: 0.01
+warmup_steps: 2000
+seed: 0
+device: cuda
+precision: bf16
+log_every: 50
+save_every: 2000
+val_every: 2000
+# Resolved under AUDIO2MAP_DATA_ROOT/splits when left as this filename by the CLI
+# default. Set an absolute path only for a local override.
+split_manifest: beatmapset_v1_drop2509435.json
+# resume: /path/to/step_N.pt
+# Pack rate-1 frames in 10% windows. n * max(frames) stops at frame_budget.
+# batch_size is ignored; the step size is however many charts fit.
+frame_budget: 458752
+window_frac: 0.10
+num_workers: 16
+# Recompute each encoder and decoder layer during backward. Default on.
+# Turn off with --no-grad-checkpoint.
+# Clip the token-mean CE gradient to this norm. Same scale as v0.
+grad_clip: 1.0
+grad_checkpoint: true

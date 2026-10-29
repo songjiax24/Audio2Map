@@ -39,8 +39,10 @@ demo = [
 audio2map-meta = "audio2map.cli.meta:main"
 audio2map-grid = "audio2map.cli.grid:main"
 audio2map-train = "audio2map.cli.train:main"
+audio2map-train-v1 = "audio2map.cli.train_v1:main"
 audio2map-eval = "audio2map.cli.eval:main"
 audio2map-infer = "audio2map.cli.infer:main"
+audio2map-infer-v1 = "audio2map.cli.infer_v1:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -1,7 +1,6 @@
 """Teacher-forcing batch. The dataset builds it and the chart model reads it.
 
-A trainable example carries normalized mel. ``precomputed=True`` carries
-detached stem rows and does not update ``AudioStem``.
+A trainable example carries normalized mel. The encoder stems it.
 """
 
 from __future__ import annotations
@@ -22,12 +21,19 @@ class V1Batch:
     cursor_time_ms: torch.Tensor
     phi: torch.Tensor
     beat_b: torch.Tensor
+    # (ln(BPM) - ln(180)) / 0.5, and u = (t - t0) / (t1 - t0).
+    log_bpm: torch.Tensor
+    rel_u: torch.Tensor
+    # Size-1 examples keep these so collate can fill right-pad frames.
+    # A collated batch has already written log_bpm and rel_u, and leaves
+    # the redline rows empty.
+    coverage_start_ms: torch.Tensor | None = None
+    coverage_end_ms: torch.Tensor | None = None
+    redline_offset_ms: torch.Tensor | None = None
+    redline_beat_ms: torch.Tensor | None = None
     audio_mask: torch.Tensor | None = None
     token_mask: torch.Tensor | None = None
-    # (B, n_mels, 2S+3) on the trainable path. None when ``precomputed``.
+    # (B, n_mels, 2S+3). The encoder reads this.
     mel: torch.Tensor | None = None
     # Real stem-frame count per example, before batch padding.
     n_frames: torch.Tensor | None = None
-    # (B, S, 512) only when ``precomputed`` is true.
-    audio: torch.Tensor | None = None
-    precomputed: bool = False

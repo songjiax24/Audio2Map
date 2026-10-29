@@ -32,41 +32,58 @@ def parse_pos_token(token: str) -> tuple[int, int]:
     return int(numer_s), int(denom_s)
 
 
+_EVENT_ROWS: tuple[RowState, ...] | None = None
+_VOCAB: dict[str, int] | None = None
+_INVERT: dict[int, str] | None = None
+
+
 def event_rows() -> tuple[RowState, ...]:
-    rows = []
-    for states in product(LaneState, repeat=4):
-        row = (
-            LaneState(states[0]),
-            LaneState(states[1]),
-            LaneState(states[2]),
-            LaneState(states[3]),
-        )
-        if is_event_row(row):
-            rows.append(row)
-    if len(rows) != 609:
-        raise RuntimeError(f"expected 609 event rows, got {len(rows)}")
-    return tuple(rows)
+    """Event rows. The scan runs once per process."""
+    global _EVENT_ROWS
+    if _EVENT_ROWS is None:
+        rows = []
+        for states in product(LaneState, repeat=4):
+            row = (
+                LaneState(states[0]),
+                LaneState(states[1]),
+                LaneState(states[2]),
+                LaneState(states[3]),
+            )
+            if is_event_row(row):
+                rows.append(row)
+        if len(rows) != 609:
+            raise RuntimeError(f"expected 609 event rows, got {len(rows)}")
+        _EVENT_ROWS = tuple(rows)
+    return _EVENT_ROWS
 
 
 def build_vocab() -> dict[str, int]:
-    vocab = {
-        TOKEN_PAD: 0,
-        TOKEN_BOS: 1,
-        TOKEN_EOS: 2,
-        TOKEN_BEAT: 3,
-    }
-    index = 4
-    for numer, denom in v80_cells():
-        vocab[pos_token(numer, denom)] = index
-        index += 1
-    for row in event_rows():
-        vocab[row_state_to_token(row)] = index
-        index += 1
-    if len(vocab) != 693:
-        raise RuntimeError(f"v1 vocab has {len(vocab)} tokens")
-    return vocab
+    """Token ids. The table is built once per process. Do not mutate it."""
+    global _VOCAB, _INVERT
+    if _VOCAB is None:
+        vocab = {
+            TOKEN_PAD: 0,
+            TOKEN_BOS: 1,
+            TOKEN_EOS: 2,
+            TOKEN_BEAT: 3,
+        }
+        index = 4
+        for numer, denom in v80_cells():
+            vocab[pos_token(numer, denom)] = index
+            index += 1
+        for row in event_rows():
+            vocab[row_state_to_token(row)] = index
+            index += 1
+        if len(vocab) != 693:
+            raise RuntimeError(f"v1 vocab has {len(vocab)} tokens")
+        _VOCAB = vocab
+        _INVERT = {token_id: token for token, token_id in vocab.items()}
+    return _VOCAB
 
 
 def invert_vocab(vocab: dict[str, int] | None = None) -> dict[int, str]:
-    source = build_vocab() if vocab is None else vocab
-    return {index: token for token, index in source.items()}
+    if vocab is None or vocab is _VOCAB:
+        build_vocab()
+        assert _INVERT is not None
+        return _INVERT
+    return {index: token for token, index in vocab.items()}

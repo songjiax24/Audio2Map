@@ -110,25 +110,37 @@ def active_hold_from_initial_row(row: RowState) -> list[bool]:
     return [s == LaneState.HOLD_ACTIVE for s in row]
 
 
+_VOCAB: dict[str, int] | None = None
+_INVERT: dict[int, str] | None = None
+
+
 def build_vocab() -> dict[str, int]:
-    vocab: dict[str, int] = {
-        TOKEN_PAD: 0,
-        TOKEN_BOS: 1,
-        TOKEN_EOS: 2,
-        TOKEN_BAR: 3,
-    }
-    idx = 4
-    for pos in range(TICKS_PER_BAR):
-        vocab[pos_to_token(pos)] = idx
-        idx += 1
-    for a, b, c, d in product(LaneState, repeat=4):
-        vocab[row_state_to_token((a, b, c, d))] = idx
-        idx += 1
-    return vocab
+    """Token ids. The table is built once per process. Do not mutate it."""
+    global _VOCAB, _INVERT
+    if _VOCAB is None:
+        vocab: dict[str, int] = {
+            TOKEN_PAD: 0,
+            TOKEN_BOS: 1,
+            TOKEN_EOS: 2,
+            TOKEN_BAR: 3,
+        }
+        idx = 4
+        for pos in range(TICKS_PER_BAR):
+            vocab[pos_to_token(pos)] = idx
+            idx += 1
+        for a, b, c, d in product(LaneState, repeat=4):
+            vocab[row_state_to_token((a, b, c, d))] = idx
+            idx += 1
+        _VOCAB = vocab
+        _INVERT = {token_id: token for token, token_id in vocab.items()}
+    return _VOCAB
 
 
 def invert_vocab(vocab: dict[str, int] | None = None) -> dict[int, str]:
-    vocab = vocab or build_vocab()
+    if vocab is None or vocab is _VOCAB:
+        build_vocab()
+        assert _INVERT is not None
+        return _INVERT
     return {idx: tok for tok, idx in vocab.items()}
 
 

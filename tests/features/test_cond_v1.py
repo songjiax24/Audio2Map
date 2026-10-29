@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from audio2map.features.cond import ChartMeta
-from audio2map.features.cond.v1.mask import sample_cond_mask
+from audio2map.features.cond.v1.mask import frozen_partial_mask, sample_cond_mask
 from audio2map.features.cond.pattern_analyser.find_patterns import FoundPattern
 from audio2map.features.cond.pattern_analyser.patterns_def import CorePattern
 from audio2map.features.cond.v1.patterns import (
@@ -15,6 +15,8 @@ from audio2map.features.cond.v1.patterns import (
     amounts_from_found,
     union_ms,
 )
+from audio2map.features.cond.official_sr import official_star_rating
+from audio2map.features.cond.v1.rate import scalars_at_rate
 from audio2map.features.cond.v1.rework import rework_star_rating
 from audio2map.features.cond.v1.vec import (
     COND_VEC_DIM,
@@ -114,6 +116,25 @@ def test_missing_field_stays_off_without_raising() -> None:
     assert vector.m_real[COND_VEC_NAMES.index("msd_overall_norm")] == 1.0
 
 
+def test_frozen_partial_mask_stays_off_missing_dims() -> None:
+    real = np.ones(18, dtype=np.float32)
+    real[1] = 0.0
+    real[5] = 0.0
+    first = frozen_partial_mask(real, seed=3, key="a.osu")
+    second = frozen_partial_mask(real, seed=3, key="a.osu")
+    assert np.array_equal(first, second)
+    assert first[1] == 0.0
+    assert first[5] == 0.0
+    assert 0 < int((first > 0).sum()) < 16
+    other = frozen_partial_mask(real, seed=3, key="b.osu")
+    assert not np.array_equal(first, other)
+    alone = np.zeros(18, dtype=np.float32)
+    alone[4] = 1.0
+    single = frozen_partial_mask(alone, seed=3, key="a.osu")
+    assert single[4] in (0.0, 1.0)
+    assert int(single.sum()) == int(single[4])
+
+
 def test_mask_and_m_real() -> None:
     real = np.ones(18, dtype=np.float32)
     real[1] = 0.0
@@ -177,6 +198,44 @@ def test_rework_without_overall_difficulty(tmp_path: Path) -> None:
     star = rework_star_rating(path)
     assert np.isfinite(star)
     assert star > 0.0
+
+
+def test_rework_speed_rate_matches_nm_and_is_not_a_multiple(tmp_path: Path) -> None:
+    path = tmp_path / "rate.osu"
+    _tiny_osu(path, overall="8")
+    nominal = rework_star_rating(path)
+    assert rework_star_rating(path, speed_rate=1.0) == nominal
+    clock = rework_star_rating(path, speed_rate=1.5)
+    assert np.isfinite(clock)
+    assert clock != np.float64(nominal * 1.5)
+
+
+def test_official_clock_rate_matches_nm_and_is_not_a_multiple(tmp_path: Path) -> None:
+    path = tmp_path / "clock.osu"
+    _tiny_osu(path, overall="8")
+    nominal = official_star_rating(path)
+    assert official_star_rating(path, clock_rate=1.0) == nominal
+    clock = official_star_rating(path, clock_rate=1.5)
+    assert np.isfinite(clock)
+    assert not np.isclose(clock, nominal * 1.5)
+
+
+def test_rate_keeps_pattern_amounts(tmp_path: Path) -> None:
+    path = tmp_path / "keep.osu"
+    _tiny_osu(path, overall="8")
+    base = ChartMeta(
+        osu_path=str(path),
+        official_sr=1.0,
+        pattern_stream=0.25,
+        analyzer_ln_percent=0.1,
+    )
+    assert scalars_at_rate(path, base, 1.0) is base
+    rated = scalars_at_rate(path, base, 1.5)
+    assert rated.pattern_stream == 0.25
+    assert rated.analyzer_ln_percent == 0.1
+    assert rated.official_sr == official_star_rating(path, clock_rate=1.5)
+    assert rated.rework_sr == rework_star_rating(path, speed_rate=1.5)
+    assert len(build_cond(rated).values) == 18
 
 
 def test_rework_on_a_small_chart(tmp_path: Path) -> None:

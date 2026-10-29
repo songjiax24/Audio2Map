@@ -30,17 +30,35 @@ class _SectionIndex:
     offset_ms: float
     beat_length_ms: float
     k_base: int
-    k_mask: tuple[bool, ...]
-    beat_ids: tuple[int, ...]
+    k_mask: np.ndarray
+    beat_ids: np.ndarray
     residual_k: int | None
     t_red_ms: float | None
 
 
+_SECTION_CACHE: dict[int, tuple[BeatGrid, tuple[_SectionIndex, ...]]] = {}
+_SECTION_LIMIT = 8
+
+
+def _section_index(grid: BeatGrid) -> tuple[_SectionIndex, ...]:
+    """Section table for ``grid``. The same grid reuses the same tuple."""
+    key = id(grid)
+    hit = _SECTION_CACHE.get(key)
+    if hit is not None and hit[0] is grid:
+        return hit[1]
+    built = _sections_from_beats(grid.beats)
+    if len(_SECTION_CACHE) >= _SECTION_LIMIT:
+        _SECTION_CACHE.clear()
+    _SECTION_CACHE[key] = (grid, built)
+    return built
+
+
 def _sections_from_beats(beats: tuple[Beat, ...]) -> tuple[_SectionIndex, ...]:
-    """Rebuild the labeler's section table from emitted beats.
+    """Section table from emitted beats.
 
     A red line that emitted nothing is omitted. The labeler skips an empty
-    mask, so those sections do not change a label.
+    mask, so those sections do not change a label. ``_section_index`` keeps
+    one table per grid.
     """
     grouped: dict[int, list[tuple[int, Beat]]] = {}
     for beat_id, beat in enumerate(beats):
@@ -70,8 +88,8 @@ def _sections_from_beats(beats: tuple[Beat, ...]) -> tuple[_SectionIndex, ...]:
                 offset_ms=offset,
                 beat_length_ms=sample.nominal_length_ms,
                 k_base=k_base,
-                k_mask=tuple(mask),
-                beat_ids=tuple(beat_ids),
+                k_mask=np.asarray(mask, dtype=bool),
+                beat_ids=np.asarray(beat_ids, dtype=np.int32),
                 residual_k=residual_k,
                 t_red_ms=t_red,
             )
@@ -219,14 +237,13 @@ def _beat_ok(
     time_ms: np.ndarray,
     t_audio_ms: float,
 ) -> np.ndarray:
-    if not section.k_mask:
+    if section.k_mask.size == 0:
         return np.zeros(beat_k.shape, dtype=bool)
     slot = beat_k - section.k_base
-    width = len(section.k_mask)
+    width = int(section.k_mask.shape[0])
     in_range = (slot >= 0) & (slot < width)
     safe = np.where(in_range, slot, 0)
-    mask = np.asarray(section.k_mask, dtype=bool)
-    ok = in_range & mask[safe]
+    ok = in_range & section.k_mask[safe]
     ok &= (time_ms >= 0.0) & (time_ms < t_audio_ms)
     if section.residual_k is not None and section.t_red_ms is not None:
         stripped = (beat_k == section.residual_k) & (time_ms >= section.t_red_ms - EPS)
@@ -236,11 +253,10 @@ def _beat_ok(
 
 def _beat_ids(section: _SectionIndex, beat_k: np.ndarray) -> np.ndarray:
     slot = beat_k - section.k_base
-    width = len(section.beat_ids)
+    width = int(section.beat_ids.shape[0])
     in_range = (slot >= 0) & (slot < width)
     safe = np.where(in_range, slot, 0)
-    ids = np.asarray(section.beat_ids, dtype=np.int32)
-    return np.where(in_range, ids[safe], -1)
+    return np.where(in_range, section.beat_ids[safe], -1)
 
 
 def _search_section(
@@ -255,7 +271,7 @@ def _search_section(
     fallback: Candidates,
 ) -> None:
     length = section.beat_length_ms
-    if length <= 0.0 or not section.k_mask:
+    if length <= 0.0 or section.k_mask.size == 0:
         return
     span = (1.0 + 2.0 * EPS) / length
     n_extra = int(math.ceil(span)) + 2
@@ -317,7 +333,7 @@ def label_times(grid: BeatGrid, orig_ms: np.ndarray) -> LabelBatch:
     fallback = Candidates.blank(count)
     lo = orig - EPS
     hi = orig + 1.0 + EPS
-    for section in _sections_from_beats(grid.beats):
+    for section in _section_index(grid):
         _search_section(
             section,
             orig=orig,

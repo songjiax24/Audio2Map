@@ -1,32 +1,52 @@
-"""A span of stem rows matches the same frames from a longer span."""
+"""A mel slice through the stem matches those frames of the full convolution."""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
+import torch
 
-from audio2map.model.audio_stem import AudioStem, stem_span
-
-# Overlapping frames are not bitwise equal. Each span builds its own mel
-# buffer, so the filterbank and Conv1d see different lengths. float32 GEMM
-# is not associative, and the kernel can depend on that shape. CI's largest
-# gap was about 5.96e-8 (2**-24). This tolerance covers that gap.
-_STEM_SPAN_ATOL = 1e-6
+from audio2map.features.audio.v1.mel import mel_span
+from audio2map.model.audio_stem import AudioStem
 
 
-def test_segment_stem_matches_full_span() -> None:
+def _conv(stem: AudioStem, mel: np.ndarray) -> torch.Tensor:
+    tensor = torch.from_numpy(np.ascontiguousarray(mel)).unsqueeze(0)
+    weight = stem.conv1.weight
+    tensor = tensor.to(device=weight.device)
+    with torch.no_grad():
+        return stem(tensor)
+
+
+def test_mel_slice_matches_the_full_conv() -> None:
     rng = np.random.default_rng(0)
     y = rng.standard_normal(22_050 * 4).astype(np.float32) * 0.1
     stem = AudioStem()
-    full = stem_span(y, 0.0, 4000.0, stem)
-    left = stem_span(y, 0.0, 2000.0, stem)
-    right = stem_span(y, 1500.0, 4000.0, stem)
-    assert left.frame_lo == full.frame_lo
-    for batch in (left, right):
-        lo = batch.frame_lo - full.frame_lo
-        hi = batch.frame_hi - full.frame_lo
-        np.testing.assert_allclose(
-            batch.features,
-            full.features[lo:hi],
-            rtol=0.0,
-            atol=_STEM_SPAN_ATOL,
-        )
+    full = mel_span(y, 0.0, 4000.0)
+    frames = full.frame_hi - full.frame_lo
+    assert full.mel.shape[1] == 2 * frames + 3
+    lo, hi = 20, 80
+    assert hi <= frames
+    width = hi - lo
+    part = full.mel[:, 2 * lo : 2 * lo + 2 * width + 3]
+    assert part.shape[1] == 2 * width + 3
+    whole = _conv(stem, full.mel)
+    sliced = _conv(stem, part)
+    assert int(whole.shape[1]) == frames
+    assert int(sliced.shape[1]) == width
+    gap = float((sliced - whole[:, lo:hi]).abs().max())
+    assert gap < 1e-5, gap
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_cuda_stem_matches_the_cpu_stem() -> None:
+    rng = np.random.default_rng(2)
+    y = rng.standard_normal(22_050).astype(np.float32) * 0.1
+    mel = mel_span(y, 0.0, 800.0).mel
+    cpu = AudioStem()
+    cuda = AudioStem().to("cuda")
+    cuda.load_state_dict(cpu.state_dict())
+    cpu_rows = _conv(cpu, mel)
+    gpu_rows = _conv(cuda, mel).cpu()
+    gap = float((gpu_rows - cpu_rows).abs().max())
+    assert gap < 1e-4, gap

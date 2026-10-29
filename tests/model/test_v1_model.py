@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from audio2map.features.audio.v1.constants import N_MELS
 from audio2map.model.v1.blocks import SelfAttention, _fill_empty, _sdpa_mask, _zero_empty
 from audio2map.model.v1.constants import D_MODEL, N_LAYERS
 from audio2map.model.v1.loss import plain_ce
@@ -132,7 +133,7 @@ def test_sliding_window_matches_dense_bool_mask(window: tuple[int, int], keeps) 
 def test_fake_batch_backward() -> None:
     torch.manual_seed(0)
     model = V1ChartModel()
-    assert len(model.encoder) == N_LAYERS == 8
+    assert len(model.encoder.layers) == N_LAYERS == 8
     assert len(model.decoder) == 8
     for layer in model.decoder:
         assert torch.count_nonzero(layer.sa_mod.proj.weight) == 0
@@ -153,8 +154,10 @@ def test_fake_batch_backward() -> None:
         cursor_time_ms=torch.linspace(-20.0, 80.0, length - 1).repeat(batch_size, 1),
         phi=torch.rand(batch_size, frames),
         beat_b=torch.tensor([-1.0, 0.0, 2.0]).repeat(batch_size, frames // 3),
-        audio=torch.randn(batch_size, frames, D_MODEL),
-        precomputed=True,
+        log_bpm=torch.zeros(batch_size, frames),
+        rel_u=torch.zeros(batch_size, frames),
+        mel=torch.randn(batch_size, N_MELS, 2 * frames + 3),
+        n_frames=torch.full((batch_size,), frames, dtype=torch.long),
     )
     model.train()
     first = model(batch)
@@ -167,8 +170,10 @@ def test_fake_batch_backward() -> None:
             cursor_time_ms=batch.cursor_time_ms,
             phi=batch.phi,
             beat_b=batch.beat_b,
-            audio=batch.audio,
-            precomputed=True,
+            log_bpm=batch.log_bpm,
+            rel_u=batch.rel_u,
+            mel=batch.mel,
+            n_frames=batch.n_frames,
         )
     )
     assert torch.allclose(first, other)

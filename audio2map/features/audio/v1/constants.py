@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from audio2map.utils.time import DT_MS
+
 SAMPLE_RATE = 22_050
 HOP = 128
 N_FFT = 1024
 N_MELS = 128
 FMIN_HZ = 20.0
-# Two hops, in milliseconds: 256 / 22050 * 1000.
-DT_MS = (2 * HOP) / SAMPLE_RATE * 1000.0
+# ``DT_MS`` is defined in ``audio2map.utils.time`` so the beat grid can share it.
 # Snap ceil(t / Δt) when the quotient is already an integer within this tolerance.
 # This is a mel-frame index, not a beat-coverage time.
 FRAME_INDEX_SNAP = 1e-8

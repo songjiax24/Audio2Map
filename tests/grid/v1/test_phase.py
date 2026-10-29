@@ -12,6 +12,17 @@ def _rl(offset: float, length: float, index: int = 0) -> Redline:
     return Redline(offset, length, 4, index)
 
 
+def test_phase_at_reuses_the_start_cache() -> None:
+    grid = build_beatgrid([_rl(0.0, 500.0)], t_audio_ms=2000.0)
+    starts = grid._starts
+    nominal = grid._nominal_ms
+    for index in range(64):
+        grid.phase_at(index * 10.0)
+    assert grid._starts is starts
+    assert grid._nominal_ms is nominal
+    assert len(starts) == len(grid.beats)
+
+
 def test_phase_on_an_ordinary_beat_and_before_the_first_redline() -> None:
     grid = build_beatgrid([_rl(500.0, 200.0)], t_audio_ms=900.0)
     assert grid.phase_at(-100.0) == (0.0, -3)

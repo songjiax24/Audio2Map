@@ -14,7 +14,7 @@ import logging
 import torch
 import torch.nn.functional as F
 
-from audio2map.model.v1.constants import D_MODEL, N_LAYERS
+from audio2map.model.v1.constants import CROSS_FUTURE, CROSS_PAST, D_MODEL, N_LAYERS
 from audio2map.model.v1.cross import window_slots
 from audio2map.model.v1.model import V1Batch, V1ChartModel, phase_fourier
 from audio2map.model.v1.windows import cross_positions
@@ -37,6 +37,170 @@ def _backend_name(codes: list[int]) -> str:
         if name not in names:
             names.append(name)
     return ",".join(names) if names else "EMPTY"
+
+
+class CrossWindow:
+    """K/V for ``[floor(c_t)-128, floor(c_t)+384)`` only. Not the whole song.
+
+    ``g`` is ``frame_lo + arange(n_frames)`` and every frame is visible.
+    The same bounds are reused until the cursor floor moves. A full span on
+    CUDA is replayed from one graph. ``teacher_decode`` does not use this; it
+    still projects the whole song.
+    """
+
+    def __init__(self, frame_lo: int, n_frames: int) -> None:
+        if n_frames < 0:
+            raise ValueError(f"n_frames={n_frames}")
+        self.frame_lo = int(frame_lo)
+        self.n_frames = int(n_frames)
+        self.rel_lo = -1
+        self.rel_hi = -1
+        self.keys: list[torch.Tensor] = []
+        self.values: list[torch.Tensor] = []
+        # A full 512-frame span stays in this storage so a CUDA graph can replay it.
+        self._full_keys: list[torch.Tensor] | None = None
+        self._full_values: list[torch.Tensor] | None = None
+        self._proj_graph: torch.cuda.CUDAGraph | None = None
+        self._proj_context: torch.Tensor | None = None
+        self._proj_base: torch.Tensor | None = None
+        self._proj_iota: torch.Tensor | None = None
+
+    def prepare(self, model: V1ChartModel, context: torch.Tensor, floor_c: int) -> None:
+        """Project the cursor span. A repeated floor does not run the linears."""
+        if context.shape[1] != self.n_frames:
+            raise ValueError(f"context length {context.shape[1]} != {self.n_frames}")
+        abs_lo = max(self.frame_lo, int(floor_c) - CROSS_PAST)
+        abs_hi = min(self.frame_lo + self.n_frames, int(floor_c) + CROSS_FUTURE)
+        rel_lo = abs_lo - self.frame_lo
+        rel_hi = abs_hi - self.frame_lo
+        if rel_lo == self.rel_lo and rel_hi == self.rel_hi and self.keys:
+            return
+        if rel_hi <= rel_lo:
+            self.keys = []
+            self.values = []
+            self.rel_lo = rel_lo
+            self.rel_hi = rel_hi
+            return
+        full = rel_hi - rel_lo == CROSS_PAST + CROSS_FUTURE
+        if (
+            full
+            and context.is_cuda
+            and self._proj_graph is not None
+            and self._proj_context is context
+        ):
+            assert self._proj_base is not None
+            assert self._full_keys is not None and self._full_values is not None
+            self._proj_base.fill_(abs_lo)
+            self._proj_graph.replay()
+            self.keys = self._full_keys
+            self.values = self._full_values
+            self.rel_lo = rel_lo
+            self.rel_hi = rel_hi
+            return
+        self._project_slice(model, context, abs_lo, abs_hi, rel_lo, rel_hi, full)
+        if full and context.is_cuda:
+            self._capture_proj(model, context, abs_lo)
+
+    def _project_slice(
+        self,
+        model: V1ChartModel,
+        context: torch.Tensor,
+        abs_lo: int,
+        abs_hi: int,
+        rel_lo: int,
+        rel_hi: int,
+        full: bool,
+    ) -> None:
+        span = context[:, rel_lo:rel_hi, :]
+        positions = torch.arange(abs_lo, abs_hi, device=context.device)
+        full_keys = self._full_keys
+        full_values = self._full_values
+        pinned = full and full_keys is not None and full_values is not None
+        into = (full_keys, full_values) if pinned else None
+        keys, values = self._project_layers(model, span, positions, into)
+        if pinned:
+            self.keys = full_keys
+            self.values = full_values
+        else:
+            self.keys = keys
+            self.values = values
+            if full:
+                self._full_keys = keys
+                self._full_values = values
+        self.rel_lo = rel_lo
+        self.rel_hi = rel_hi
+
+    def _capture_proj(self, model: V1ChartModel, context: torch.Tensor, abs_lo: int) -> None:
+        """Record the full-span projection. Later floors only refill ``abs_lo``."""
+        span = CROSS_PAST + CROSS_FUTURE
+        if self._proj_iota is None or self._proj_iota.device != context.device:
+            self._proj_iota = torch.arange(span, device=context.device)
+            self._proj_base = torch.zeros((), dtype=torch.long, device=context.device)
+        assert self._proj_base is not None
+        self._proj_base.fill_(abs_lo)
+        self._proj_context = context
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                self._project_full(model, context)
+        torch.cuda.current_stream().wait_stream(stream)
+        self._proj_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._proj_graph):
+            self._project_full(model, context)
+
+    def _project_full(self, model: V1ChartModel, context: torch.Tensor) -> None:
+        """Gather ``[abs_lo, abs_lo+512)`` and write the pinned K/V. Graph-safe."""
+        assert self._proj_base is not None and self._proj_iota is not None
+        assert self._full_keys is not None and self._full_values is not None
+        index = self._proj_iota + (self._proj_base - self.frame_lo)
+        span = context.index_select(1, index)
+        positions = self._proj_base + self._proj_iota
+        self._project_layers(model, span, positions, (self._full_keys, self._full_values))
+
+    def _project_layers(
+        self,
+        model: V1ChartModel,
+        span: torch.Tensor,
+        positions: torch.Tensor,
+        into: tuple[list[torch.Tensor], list[torch.Tensor]] | None,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        width = span.shape[1]
+        keys: list[torch.Tensor] = []
+        values: list[torch.Tensor] = []
+        for index, layer in enumerate(model.decoder):
+            attn = layer.cross_attn
+            flat_k = attn.k_proj(span).view(1, width, attn.n_heads, attn.head_dim)
+            flat_v = attn.v_proj(span).view(1, width, attn.n_heads, attn.head_dim)
+            key = attn.rotary.apply(flat_k.transpose(1, 2), positions)
+            value = flat_v.transpose(1, 2).contiguous()
+            if into is None:
+                keys.append(key)
+                values.append(value)
+            else:
+                into[0][index].copy_(key)
+                into[1][index].copy_(value)
+        return keys, values
+
+    def attend(
+        self,
+        attn: torch.nn.Module,
+        query: torch.Tensor,
+        c_t: torch.Tensor,
+        layer: int,
+    ) -> torch.Tensor:
+        """One query, the prepared span, no index rebuild and no backend read."""
+        if not self.keys or self.rel_hi <= self.rel_lo:
+            zeros = query.new_zeros(query.shape[0], query.shape[1], D_MODEL)
+            return attn.out_proj(zeros)
+        key = self.keys[layer]
+        value = self.values[layer]
+        batch, q_len, _ = query.shape
+        q = attn.q_proj(query).view(batch, q_len, attn.n_heads, attn.head_dim).transpose(1, 2)
+        q = attn.rotary.apply(q, c_t)
+        mixed = F.scaled_dot_product_attention(q, key, value)
+        mixed = mixed.transpose(1, 2).contiguous().view(batch, q_len, D_MODEL)
+        return attn.out_proj(mixed)
 
 
 def project_cross_cache(
@@ -120,18 +284,33 @@ def teacher_decode(model: V1ChartModel, batch: V1Batch) -> DecodeResult:
     """Gold-token steps. Cross-attention reads the preprojected cache."""
     if model.training:
         raise RuntimeError("teacher_decode is inference only")
-    audio = model._audio_rows(batch)
-    device = audio.device
+    if batch.mel is None or batch.n_frames is None:
+        raise ValueError("teacher_decode needs mel and n_frames")
+    device = model.encoder.stem.conv1.weight.device
     tokens = batch.token_ids[:, :-1].to(device)
     steps = tokens.shape[1]
-    audio_mask = (
-        torch.ones(audio.shape[:2], dtype=torch.bool, device=device)
-        if batch.audio_mask is None
-        else batch.audio_mask.to(device)
+    if batch.audio_mask is None:
+        audio_mask = torch.ones(
+            batch.mel.shape[0],
+            int(batch.n_frames.max()),
+            dtype=torch.bool,
+            device=device,
+        )
+    else:
+        audio_mask = batch.audio_mask.to(device)
+    memory = model.encoder(
+        batch.mel,
+        batch.frame_lo.to(device),
+        audio_mask,
+        n_frames=batch.n_frames,
     )
-    memory = model.encode(audio, batch.frame_lo.to(device), audio_mask)
     context = memory + model.phase(
-        phase_fourier(batch.phi.to(device=device, dtype=memory.dtype), batch.beat_b.to(device))
+        phase_fourier(
+            batch.phi.to(device=device, dtype=memory.dtype),
+            batch.beat_b.to(device),
+            batch.log_bpm.to(device=device),
+            batch.rel_u.to(device=device),
+        )
     )
     g, p_q = cross_positions(batch.frame_lo, context.shape[1], batch.cursor_time_ms.to(device))
     cache = project_cross_cache(model, context, g)

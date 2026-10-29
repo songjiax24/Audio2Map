@@ -1,6 +1,12 @@
 """v1 condition vector. v0 ``build_cond_vec`` stays on ``features.cond.vec``."""
 
-from audio2map.features.cond.v1.mask import DROP_ALL_P, KEEP_ALL_P, P_KEEP, sample_cond_mask
+from audio2map.features.cond.v1.mask import (
+    DROP_ALL_P,
+    KEEP_ALL_P,
+    P_KEEP,
+    frozen_partial_mask,
+    sample_cond_mask,
+)
 from audio2map.features.cond.v1.patterns import (
     PatternPass,
     analyze_patterns_once,
@@ -41,6 +47,7 @@ __all__ = [
     "PatternPass",
     "analyze_patterns_once",
     "build_cond",
+    "frozen_partial_mask",
     "rework_star_rating",
     "sample_cond_mask",
     "PATTERN_ORDER",

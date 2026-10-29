@@ -139,16 +139,25 @@ def legal_tokens(cursor: Cursor, grid: BeatGrid) -> set[str]:
     return allowed
 
 
-def step(cursor: Cursor, token: str, grid: BeatGrid) -> None:
+def step(
+    cursor: Cursor,
+    token: str,
+    grid: BeatGrid,
+    *,
+    allowed: set[str] | None = None,
+) -> None:
     """Apply ``token`` only after it is legal. The cursor is unchanged on failure.
 
-    ``legal_tokens`` only returns a set. An open hold at the end of the grid
-    is a bad chart, so ``step`` rejects it before changing beat or hold state.
+    Pass ``allowed`` from a ``legal_tokens`` call on this same cursor so the
+    check is not repeated. Omit it and ``step`` computes the set. An open hold
+    at the end of the grid is a bad chart, so ``step`` rejects it before
+    changing beat or hold state.
     """
     facts = _facts(cursor, grid)
     if cursor.beat_id >= len(grid.beats) and any(cursor.active):
         raise ChartRejected(OPEN_HOLD_AT_END, "reached G_end with an open hold")
-    allowed = legal_tokens(cursor, grid)
+    if allowed is None:
+        allowed = legal_tokens(cursor, grid)
     if token not in allowed:
         raise IllegalTokenError(token)
     if token == TOKEN_EOS:

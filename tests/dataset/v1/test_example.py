@@ -58,13 +58,12 @@ def test_full_chart_batch_matches_the_model_contract() -> None:
         200.0,
     )
     frames = int(batch.n_frames[0])
-    assert batch.precomputed is False
-    assert batch.audio is None
     assert batch.mel is not None
     assert batch.mel.shape == (1, N_MELS, 2 * frames + 3)
     assert batch.token_ids.shape[0] == 1
     assert batch.cursor_time_ms.shape == (1, batch.token_ids.shape[1] - 1)
     assert batch.phi.shape == batch.beat_b.shape == (1, frames)
+    assert batch.log_bpm.shape == batch.rel_u.shape == (1, frames)
     assert batch.cond_x.shape == batch.cond_m.shape == (1, 18)
     assert bool(batch.audio_mask.all())
     expected_times = cursor_times_ms(encoded.tokens, encoded.grid)
@@ -118,30 +117,13 @@ def test_train_mask_repeats_for_a_fixed_rng() -> None:
 def test_shared_stem_receives_backward() -> None:
     stem = AudioStem()
     model = V1ChartModel(stem=stem)
-    assert model.stem is stem
+    assert model.encoder.stem is stem
     batch = build_v1_example(_chart(200.0), meta=_meta(), cond_mask="none")
     model.train()
     loss = plain_ce(model(batch), batch.token_ids[:, 1:])
     assert torch.isfinite(loss)
     loss.backward()
     assert stem.conv1.weight.grad is not None
-
-
-def test_precomputed_rows_do_not_train_the_model_stem() -> None:
-    batch = build_v1_example(
-        _chart(200.0),
-        meta=_meta(),
-        precomputed_stem=AudioStem(),
-    )
-    assert batch.precomputed is True
-    assert batch.mel is None
-    assert batch.audio is not None
-    assert batch.audio.shape[-1] == 512
-    model = V1ChartModel()
-    model.train()
-    loss = plain_ce(model(batch), batch.token_ids[:, 1:])
-    loss.backward()
-    assert model.stem.conv1.weight.grad is None
 
 
 def test_tensor_cond_mask_is_anded_with_m_real() -> None:
@@ -252,7 +234,6 @@ def test_local_osu_forward_uses_the_eval_mask() -> None:
     batch = build_v1_example(path, meta=meta, cond_mask="none")
     real = torch.from_numpy(build_cond(meta).m_real)
     assert torch.equal(batch.cond_m[0], real)
-    assert batch.precomputed is False
     model = V1ChartModel()
     model.eval()
     logits = model(batch)

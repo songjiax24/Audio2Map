@@ -6,7 +6,7 @@ import numpy as np
 
 from audio2map.grid.v1.beatgrid import build_beatgrid
 from audio2map.osu.v1.timing import Redline
-from audio2map.tokens.v1.labels import label_times
+from audio2map.tokens.v1.labels import _section_index, label_times
 
 
 def test_time_zero_uses_the_legal_1_32_not_the_negative_downbeat() -> None:
@@ -17,3 +17,13 @@ def test_time_zero_uses_the_legal_1_32_not_the_negative_downbeat() -> None:
     assert int(labels.denom[0]) == 32
     assert labels.time_ms[0] > 0.0
     assert not labels.from_window[0]
+
+
+def test_section_index_is_reused_for_the_same_grid() -> None:
+    grid = build_beatgrid([Redline(0.0, 500.0, 4, 0)], t_audio_ms=2000.0)
+    first = _section_index(grid)
+    assert _section_index(grid) is first
+    label_times(grid, np.array([0.0, 100.0]))
+    assert _section_index(grid) is first
+    other = build_beatgrid([Redline(0.0, 400.0, 4, 0)], t_audio_ms=2000.0)
+    assert _section_index(other) is not first
