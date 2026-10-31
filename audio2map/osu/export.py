@@ -8,6 +8,7 @@ from pathlib import Path
 
 from audio2map.osu.parser import HIT_CIRCLE, HIT_HOLD
 from audio2map.osu.schema import ManiaNote, NoteType
+from audio2map.osu.v1.export import fresh_mania_lines
 
 COL4K_X = (64, 192, 320, 448)
 MANIA_Y = 192
@@ -219,52 +220,13 @@ def _lines_from_scratch(
     audio_filename: str,
 ) -> list[str]:
     beat_length = 60_000.0 / original_bpm
-    return [
-        "osu file format v14",
-        "",
-        "[General]",
-        f"AudioFilename: {audio_filename}",
-        "AudioLeadIn: 0",
-        "PreviewTime: -1",
-        "Countdown: 0",
-        "SampleSet: Soft",
-        "StackLeniency: 0.7",
-        "Mode: 3",
-        "LetterboxInBreaks: 0",
-        "SpecialStyle: 0",
-        "WidescreenStoryboard: 0",
-        "",
-        "[Editor]",
-        "DistanceSpacing: 1",
-        "BeatDivisor: 4",
-        "GridSize: 4",
-        "TimelineZoom: 1",
-        "",
-        "[Metadata]",
-        f"Title:{title}",
-        f"TitleUnicode:{title}",
-        f"Artist:{artist}",
-        f"ArtistUnicode:{artist}",
-        f"Creator:{creator}",
-        f"Version:{version}",
-        "Source:",
-        "Tags:",
-        "BeatmapID:0",
-        "BeatmapSetID:-1",
-        "",
-        "[Difficulty]",
-        "HPDrainRate:8",
-        "CircleSize:4",
-        "OverallDifficulty:8",
-        "ApproachRate:5",
-        "SliderMultiplier:1.4",
-        "SliderTickRate:1",
-        "",
-        "[Events]",
-        "//Background and Video events",
-        "",
-        "[TimingPoints]",
-        f"{int(offset_ms)},{beat_length:.6f},4,2,0,100,1,0",
-        "",
-        *_hit_object_lines(hit_lines),
-    ]
+    timing = f"{int(offset_ms)},{beat_length:.6f},4,2,0,100,1,0"
+    return fresh_mania_lines(
+        hit_lines,
+        [timing],
+        title=title,
+        artist=artist,
+        creator=creator,
+        version=version,
+        audio_filename=audio_filename,
+    )

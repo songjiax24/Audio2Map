@@ -57,7 +57,13 @@ def notes_from_events(events: Sequence[DecodedEvent]) -> tuple[tuple[V1Note, ...
 
 
 def hit_lines_from_notes(notes: Sequence[V1Note]) -> list[str]:
-    return [_hit_line(note) for note in notes]
+    """osu lines in time order. Pattern Analyser walks the file in that order.
+
+    ``notes`` may be grouped by column. A later column then jumps backward
+    in time, and the analyser rejects the chart.
+    """
+    ordered = sorted(notes, key=lambda note: (note.time_ms, note.col, _end(note)))
+    return [_hit_line(note) for note in ordered]
 
 
 def hit_lines_from_events(events: list[DecodedEvent]) -> tuple[list[str], list[str]]:

@@ -136,7 +136,9 @@ def test_generate_returns_notes_and_the_caller_writes(tmp_path: Path) -> None:
     text = audit.path.read_text(encoding="utf-8")
     assert "\n0,500,4,2,0,100,1,0\n" in text
     assert "-50," not in text
-    assert "AudioFilename:song.mp3" in text
+    assert "AudioFilename: song.mp3" in text
+    assert "AudioLeadIn: 0" in text
+    assert "HPDrainRate:8" in text
     assert "Version:Audio2Map" in text
     parsed = parse_beatmap(audit.path)
     assert parsed.metadata.title == "Made"
@@ -168,6 +170,8 @@ def test_export_keeps_a_shut_hold_and_a_duplicate(tmp_path: Path) -> None:
     assert any("not after head" in item for item in warnings)
     assert any("unclosed" in item for item in warnings)
     assert sum(line.startswith("64,192,10,1,") for line in lines) == 2
+    times = [int(line.split(",")[2]) for line in lines]
+    assert times == sorted(times)
     assert any(line.startswith("192,192,0,128,0,0:") for line in lines)
     assert any(line.startswith("320,192,50,128,0,50:") for line in lines)
     source = tmp_path / "in.osu"

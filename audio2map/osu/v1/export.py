@@ -42,9 +42,9 @@ def write_v1_osu(
     """
     timing = [_timing_line(line) for line in redlines]
     if source_osu is None:
-        body = _fresh(
-            timing,
+        body = fresh_mania_lines(
             hit_lines,
+            timing,
             audio_filename=audio_filename,
             title=title,
             artist=artist,
@@ -59,39 +59,70 @@ def write_v1_osu(
     return ExportAudit(path, tuple(warnings), len(hit_lines))
 
 
-def _fresh(
-    timing: list[str],
-    hits: list[str],
+def fresh_mania_lines(
+    hit_lines: list[str],
+    timing_lines: list[str],
     *,
-    audio_filename: str,
     title: str,
     artist: str,
     creator: str,
     version: str,
+    audio_filename: str,
 ) -> list[str]:
+    """The one from-scratch mania 4K file. Callers supply timing lines.
+
+    v0's BPM path uses this too. A second shell does not belong in
+    ``osu/export.py``.
+    """
     return [
         "osu file format v14",
         "",
         "[General]",
-        f"AudioFilename:{audio_filename}",
-        "Mode:3",
+        f"AudioFilename: {audio_filename}",
+        "AudioLeadIn: 0",
+        "PreviewTime: -1",
+        "Countdown: 0",
+        "SampleSet: Soft",
+        "StackLeniency: 0.7",
+        "Mode: 3",
+        "LetterboxInBreaks: 0",
+        "SpecialStyle: 0",
+        "WidescreenStoryboard: 0",
+        "",
+        "[Editor]",
+        "DistanceSpacing: 1",
+        "BeatDivisor: 4",
+        "GridSize: 4",
+        "TimelineZoom: 1",
         "",
         "[Metadata]",
         f"Title:{title}",
+        f"TitleUnicode:{title}",
         f"Artist:{artist}",
+        f"ArtistUnicode:{artist}",
         f"Creator:{creator}",
         f"Version:{version}",
+        "Source:",
+        "Tags:",
         "BeatmapID:0",
+        "BeatmapSetID:-1",
         "",
         "[Difficulty]",
+        "HPDrainRate:8",
         "CircleSize:4",
         "OverallDifficulty:8",
+        "ApproachRate:5",
+        "SliderMultiplier:1.4",
+        "SliderTickRate:1",
+        "",
+        "[Events]",
+        "//Background and Video events",
         "",
         "[TimingPoints]",
-        *timing,
+        *timing_lines,
         "",
         "[HitObjects]",
-        *hits,
+        *hit_lines,
     ]
 
 
