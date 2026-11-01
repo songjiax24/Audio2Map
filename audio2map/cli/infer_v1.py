@@ -68,7 +68,7 @@ def main() -> None:
     out = Path(args.out)
     checkpoint = Path(args.checkpoint) if args.checkpoint else None
     decoded = decode_audio(audio)
-    if decoded.timeline_broken:
+    if decoded.timeline_spliced:
         raise ValueError(f"音频损坏: {audio}")
     redlines = parse_redlines_file(timing).redlines
     model = load_v1_model(checkpoint, device)

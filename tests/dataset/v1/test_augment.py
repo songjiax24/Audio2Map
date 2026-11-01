@@ -12,6 +12,7 @@ from audio2map.dataset.v1.augment import (
     AugmentChoice,
     apply_clock,
     clock_chart,
+    mirror_tokens,
     sample_augment,
 )
 from audio2map.tokens.v1.cursor_time import cursor_times_ms
@@ -91,6 +92,47 @@ def test_rate_keeps_tokens_and_scales_cursor_time() -> None:
     scaled_phi, scaled_beat = slow.encoded.grid.phase_at(80.0 / 0.8)
     assert scaled_phi == pytest.approx(phi)
     assert scaled_beat == beat
+
+
+def test_mirror_tokens_match_a_mirrored_chart() -> None:
+    notes = [
+        ManiaNote(100, 0, NoteType.TAP),
+        ManiaNote(500, 1, NoteType.HOLD, 800),
+    ]
+    redlines = (Redline(0.0, 151.35, 4, 0),)
+    pcm = np.ones(SAMPLE_RATE, dtype=np.float32)
+    plain = clock_chart(notes, redlines, pcm, 1000.0, AugmentChoice(False, 1.0))
+    mirrored = clock_chart(notes, redlines, pcm, 1000.0, AugmentChoice(True, 1.0))
+    assert mirror_tokens(plain.encoded.tokens) == mirrored.encoded.tokens
+
+
+def test_cached_tokens_skip_labeling(monkeypatch: pytest.MonkeyPatch) -> None:
+    notes = [
+        ManiaNote(100, 0, NoteType.TAP),
+        ManiaNote(500, 1, NoteType.HOLD, 800),
+    ]
+    redlines = (Redline(0.0, 151.35, 4, 0),)
+    pcm = np.ones(SAMPLE_RATE, dtype=np.float32)
+    plain = clock_chart(notes, redlines, pcm, 1000.0, AugmentChoice(False, 1.0))
+
+    def cached(relpath: str, t_audio_ms: float) -> list[str]:
+        assert relpath == "a.osu"
+        assert t_audio_ms == 1000.0
+        return list(plain.encoded.tokens)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("labeled a cached chart")
+
+    monkeypatch.setattr("audio2map.dataset.v1.augment.cached_rate1_tokens", cached)
+    monkeypatch.setattr("audio2map.dataset.v1.augment.encode_chart", forbidden)
+    hit = clock_chart(
+        notes, redlines, pcm, 1000.0, AugmentChoice(False, 1.25), relpath="a.osu"
+    )
+    assert hit.encoded.tokens == plain.encoded.tokens
+    mirrored = clock_chart(
+        notes, redlines, pcm, 1000.0, AugmentChoice(True, 1.0), relpath="a.osu"
+    )
+    assert mirrored.encoded.tokens == mirror_tokens(plain.encoded.tokens)
 
 
 def test_object_end_includes_hold_tail(tmp_path) -> None:

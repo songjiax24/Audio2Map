@@ -56,8 +56,8 @@ def train_audio_paths(raw_root: Path) -> list[Path]:
 
 def song_moments(path: Path) -> tuple[float, float, int, str]:
     decoded = decode_audio(path)
-    if decoded.timeline_broken:
-        raise RuntimeError(f"timeline broken: {path}")
+    if decoded.timeline_spliced:
+        raise RuntimeError(f"timeline spliced: {path}")
     t_audio = decoded.t_audio_ms
     frame_lo = frame_index(0.0)
     frame_hi = frame_index(t_audio)

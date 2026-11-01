@@ -13,6 +13,7 @@ from audio2map.features.audio.v1.decode import (
     resample_hq,
     stream_from_probe,
     timeline_broken,
+    timeline_spliced,
 )
 from audio2map.features.audio.v1.mel import frame_index
 
@@ -25,6 +26,11 @@ def test_timeline_broken_matches_ffmpeg_7_1_1() -> None:
     bounce = "Application provided invalid, non monotonically increasing dts to muxer in stream 0"
     assert not timeline_broken(bounce)
     assert not timeline_broken("timestamp discontinuity of 448 samples")
+    assert not timeline_spliced(packet)
+    assert not timeline_spliced(bounce)
+    assert not timeline_spliced("timestamp discontinuity of 448 samples")
+    assert timeline_spliced(packet + "\n" + "timestamp discontinuity of 448 samples")
+    assert timeline_spliced("Header missing\n" + bounce)
 
 
 def test_equal_weight_mix_and_resample_length() -> None:

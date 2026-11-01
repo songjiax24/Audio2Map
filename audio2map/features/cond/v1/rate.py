@@ -18,6 +18,40 @@ from audio2map.features.cond.v1.rework import rework_star_rating
 from audio2map.osu.parser import parse_beatmap
 
 
+# Replaced when the clock changes. Pattern ratios are not in this list.
+CLOCK_SCALAR_FIELDS: tuple[str, ...] = (
+    "official_sr",
+    "rework_sr",
+    "msd_overall",
+    "msd_stream",
+    "msd_jumpstream",
+    "msd_handstream",
+    "msd_stamina",
+    "msd_jack_speed",
+    "msd_chordjack",
+    "msd_technical",
+)
+
+
+def clock_scalars_ready(meta: ChartMeta) -> bool:
+    """True when every clock-varying scalar is already a finite rate-1 value.
+
+    A clock change replaces these numbers and does not turn a present dim off.
+    The train mask can be drawn from this ``m_real`` before the numbers exist.
+    """
+    for name in CLOCK_SCALAR_FIELDS:
+        value = getattr(meta, name)
+        if value is None:
+            return False
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number):
+            return False
+    return True
+
+
 def scalars_at_rate(path: Path | str, base: ChartMeta, rate: float) -> ChartMeta:
     """Copy ``base`` and replace SR, Rework, and MSD when ``rate != 1``."""
     if not math.isfinite(rate) or rate <= 0.0:

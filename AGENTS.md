@@ -18,7 +18,8 @@ may not reach sideways to skip a documented boundary. `features` does not import
 `tokens` or `model`. `osu` does not import `grid`.
 
 One behavior has one implementation. A second copy needs a named owner and a
-test that the two outputs match, or it does not land.
+test that the two outputs match, or it does not land. During the v1 transition
+a second copy may stay when `docs/v1_design.md` names which copy remains.
 
 ## v1 package names
 

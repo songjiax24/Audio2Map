@@ -90,6 +90,21 @@ def v1_length_dir() -> Path:
     return processed_dir() / "v1_length"
 
 
+def v1_token_dir() -> Path:
+    """Rate-1 token ids for v1 training. Not the length cache and not raw audio."""
+    return processed_dir() / "v1_tokens"
+
+
+def v1_audio_dir() -> Path:
+    """Rate-1 PCM and mel for v1 training. Not raw audio and not ``audio_grid``."""
+    return processed_dir() / "v1_audio"
+
+
+def v1_gate_dir() -> Path:
+    """Decisions for the v1 chart gate. Not a split file and not raw audio."""
+    return processed_dir() / "v1_gate"
+
+
 def v1_chart_meta_path() -> Path:
     """Rate-1 v1 ChartMeta jsonl. Not ``chart_meta/manifest.jsonl`` (that file is v0)."""
     return processed_dir() / "v1_chart_meta" / "manifest.jsonl"

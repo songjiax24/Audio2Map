@@ -66,15 +66,18 @@ def test_resume_restores_weights_optimizer_and_rng(tmp_path: Path) -> None:
     assert restored.ca_train == "flex"
 
 
-def test_resume_rejects_a_different_train_count(tmp_path: Path) -> None:
+def test_resume_restarts_order_when_the_train_count_changes(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     model, opt = _stepped_pair()
     dataset = _dataset(tmp_path, seed=1)
     path = tmp_path / "step_2.pt"
     split = tmp_path / "split.json"
-    _save(model, opt, dataset, 2, 0, 0, path, seed=1, split_path=split)
+    _save(model, opt, dataset, 2, 4, 9, path, seed=1, split_path=split)
     other, other_opt = _stepped_pair()
-    with pytest.raises(RuntimeError, match="n_train"):
-        load_train_checkpoint(
+    with caplog.at_level(logging.WARNING):
+        step, epoch, order_index = load_train_checkpoint(
             path,
             other,
             other_opt,
@@ -84,6 +87,10 @@ def test_resume_rejects_a_different_train_count(tmp_path: Path) -> None:
             n_train=3,
             split_path=split,
         )
+    assert (step, epoch, order_index) == (2, 0, 0)
+    assert torch.equal(other.token_emb.weight, model.token_emb.weight)
+    assert "n_train" in caplog.text
+    assert "epoch 0" in caplog.text
 
 
 def test_old_checkpoint_keeps_weights_and_warns(

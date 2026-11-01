@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import multiprocessing as mp
+import os
 from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass
 
@@ -20,6 +21,15 @@ from audio2map.model.v1.batch import V1Batch
 logger = logging.getLogger(__name__)
 
 
+def _limit_worker_threads() -> None:
+    """One compute thread per worker. The default of 64 threads oversubscribes."""
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+
+
 @dataclass(frozen=True, slots=True)
 class PlannedChart:
     """One chart after the main process has consumed the train RNG."""
@@ -29,6 +39,8 @@ class PlannedChart:
     rate: float
     meta: dict | None
     cond_mask: list[float] | None
+    record_legal: bool = False
+    rate_scalars: bool = False
 
 
 @dataclass
@@ -55,8 +67,16 @@ def build_planned(root: str, planned: PlannedChart) -> V1Batch:
         loaded.pcm,
         t_audio,
         AugmentChoice(mirror=planned.mirror, rate=planned.rate),
+        relpath=planned.relpath,
     )
-    source = ChartAudio(notes=prepared.notes, redlines=prepared.redlines, pcm=prepared.pcm)
+    rate1 = planned.rate == 1.0
+    source = ChartAudio(
+        notes=prepared.notes,
+        redlines=prepared.redlines,
+        pcm=prepared.pcm,
+        t_audio_ms=t_audio if rate1 else None,
+        audio_key=loaded.audio_key if rate1 else None,
+    )
     cond: torch.Tensor | str
     if planned.cond_mask is None:
         cond = "none"
@@ -68,11 +88,16 @@ def build_planned(root: str, planned: PlannedChart) -> V1Batch:
         meta = rate1_meta_for(Path(root), planned.relpath)
     else:
         meta = ChartMeta.from_dict(planned.meta)
+    if planned.rate_scalars:
+        from audio2map.features.cond.v1.rate import scalars_at_rate
+
+        meta = scalars_at_rate(Path(root) / planned.relpath, meta, planned.rate)
     return build_v1_example(
         source,
         meta=meta,
         cond_mask=cond,
         encoded=prepared.encoded,
+        record_legal=planned.record_legal,
     )
 
 
@@ -86,8 +111,17 @@ class ChartBuilder:
         self.root = str(dataset.root)
         self.pool: ProcessPoolExecutor | None = None
         if workers > 1:
+            # Children read these before importing numpy. The parent already did.
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ["OPENBLAS_NUM_THREADS"] = "1"
+            os.environ["MKL_NUM_THREADS"] = "1"
+            os.environ["RAYON_NUM_THREADS"] = "1"
             context = mp.get_context("spawn")
-            self.pool = ProcessPoolExecutor(max_workers=workers, mp_context=context)
+            self.pool = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=context,
+                initializer=_limit_worker_threads,
+            )
 
     def close(self) -> None:
         if self.pool is not None:

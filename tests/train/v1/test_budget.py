@@ -9,11 +9,11 @@ import torch
 
 from audio2map.dataset.v1.shape import chart_shape
 from audio2map.features.audio.v1.mel import frame_index
-from audio2map.model.v1.loss import accuracy_counts, nonpad_count, plain_ce
+from audio2map.model.v1.loss import accuracy_counts, ce_by_type, nonpad_count, plain_ce
 from audio2map.osu.schema import ManiaNote, NoteType
 from audio2map.osu.v1.timing import Redline
 from audio2map.tokens.v1.codec import encode_chart
-from audio2map.tokens.v1.vocab import TOKEN_PAD, build_vocab
+from audio2map.tokens.v1.vocab import TOKEN_BOS, TOKEN_PAD, build_vocab
 from audio2map.train.v1.batches import (
     FRAME_BUDGET,
     cut_windows,
@@ -53,6 +53,36 @@ def test_accuracy_ignores_pad_and_splits_gold_types() -> None:
     assert counts["row"] == (1, 1)
     assert counts["beat"] == (0, 1)
     assert counts["eos"] == (1, 1)
+
+
+def test_ce_by_type_is_the_mean_on_each_gold_type() -> None:
+    vocab = build_vocab()
+    width = len(vocab)
+    pos = next(index for token, index in vocab.items() if token.startswith("<POS_"))
+    row = next(index for token, index in vocab.items() if token.startswith("<ROW_"))
+    beat = vocab["<BEAT>"]
+    eos = vocab["<EOS>"]
+    pad = vocab[TOKEN_PAD]
+    targets = torch.tensor([[pos, pos, row, beat, eos, pad]])
+    logits = torch.zeros(1, targets.shape[1], width)
+    parts = ce_by_type(logits, targets)
+    assert parts["pos"][1] == 2
+    assert parts["row"][1] == 1
+    assert parts["beat"][1] == 1
+    assert parts["eos"][1] == 1
+    total = sum(value for value, _count in parts.values())
+    count = sum(_count for _value, _count in parts.values())
+    mean = total / count
+    assert abs(mean - math.log(width)) < 1e-4
+    assert abs(mean - float(plain_ce(logits, targets))) < 1e-4
+    missing = torch.tensor([[pos, row, eos, pad]])
+    gone = ce_by_type(logits[:, :4], missing)
+    assert gone["beat"] == (0.0, 0)
+    try:
+        ce_by_type(logits[:, :1], torch.tensor([[vocab[TOKEN_BOS]]]))
+    except RuntimeError:
+        return
+    raise AssertionError("BOS should not be a loss type")
 
 
 def test_chart_shape_matches_the_forward_grid() -> None:

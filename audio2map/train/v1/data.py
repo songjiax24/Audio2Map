@@ -15,7 +15,7 @@ from audio2map.dataset.v1.example import ChartAudio, CondMask, build_v1_example,
 from audio2map.features.audio.v1.constants import SAMPLE_RATE
 from audio2map.features.cond.chart import ChartMeta, compute_chart_meta
 from audio2map.features.cond.v1.mask import sample_cond_mask
-from audio2map.features.cond.v1.rate import scalars_at_rate
+from audio2map.features.cond.v1.rate import clock_scalars_ready, scalars_at_rate
 from audio2map.features.cond.v1.store import append_v1_chart_meta_records, load_v1_chart_meta
 from audio2map.features.cond.v1.vec import build_cond
 from audio2map.model.v1.batch import V1Batch
@@ -35,11 +35,13 @@ class V1ChartDataset(Dataset):
         augment: bool,
         cond_mask: CondMask,
         seed: int,
+        record_legal: bool = False,
     ) -> None:
         self.charts = list(charts)
         self.root = root
         self.augment = augment
         self.cond_mask = cond_mask
+        self.record_legal = record_legal
         self._rng = np.random.default_rng(seed)
         self._meta: dict[str, ChartMeta] = {}
         self._meta_loaded = False
@@ -59,11 +61,19 @@ class V1ChartDataset(Dataset):
         chart = self.charts[index]
         path = self.root / chart.relpath
         choice = sample_augment(self._rng, enabled=self.augment)
-        # Validation draws neither augment nor a mask, so the worker computes
-        # the rate-1 condition and overlaps it with decode. Training needs the
-        # condition before the mask draw, on this process.
+        # Validation draws neither augment nor a mask. The worker then builds
+        # the rate-1 condition while it decodes. The train mask uses rate-1
+        # presence: a clock change replaces the ten scalar values and does not
+        # remove a dim. Those values are computed on the worker. A missing
+        # scalar is filled here first, so the mask can turn that dim on.
         meta_now = self.cond_mask == "train" or choice.rate != 1.0
-        meta = self._meta_at(chart.relpath, path, choice.rate) if meta_now else None
+        meta = self._rate1_meta(chart.relpath, path) if meta_now else None
+        rate_scalars = False
+        if meta is not None and choice.rate != 1.0:
+            if clock_scalars_ready(meta):
+                rate_scalars = True
+            else:
+                meta = scalars_at_rate(path, meta, choice.rate)
         cond_mask: list[float] | None
         if self.cond_mask == "train":
             if meta is None:
@@ -80,6 +90,8 @@ class V1ChartDataset(Dataset):
             rate=choice.rate,
             meta=None if meta is None else meta.to_dict(),
             cond_mask=cond_mask,
+            record_legal=self.record_legal,
+            rate_scalars=rate_scalars,
         )
 
     def __getitem__(self, index: int) -> V1Batch:
@@ -97,11 +109,15 @@ class V1ChartDataset(Dataset):
             loaded.pcm,
             t_audio,
             choice,
+            relpath=chart.relpath,
         )
+        rate1 = choice.rate == 1.0
         source = ChartAudio(
             notes=prepared.notes,
             redlines=prepared.redlines,
             pcm=prepared.pcm,
+            t_audio_ms=t_audio if rate1 else None,
+            audio_key=loaded.audio_key if rate1 else None,
         )
         return build_v1_example(
             source,
@@ -117,17 +133,22 @@ class V1ChartDataset(Dataset):
         self._meta.update(load_v1_chart_meta())
         self._meta_loaded = True
 
-    def _meta_at(self, relpath: str, path: Path, rate: float) -> ChartMeta:
+    def _rate1_meta(self, relpath: str, path: Path) -> ChartMeta:
         self._ensure_disk()
         base = self._meta.get(relpath)
-        if base is None:
-            base = compute_chart_meta(path)
-            self._meta[relpath] = base
-            record = base.to_dict()
-            record["relpath"] = relpath
-            append_v1_chart_meta_records([record])
-            if base.error:
-                logger.warning("chart meta %s: %s", path.name, base.error)
+        if base is not None:
+            return base
+        base = compute_chart_meta(path)
+        self._meta[relpath] = base
+        record = base.to_dict()
+        record["relpath"] = relpath
+        append_v1_chart_meta_records([record])
+        if base.error:
+            logger.warning("chart meta %s: %s", path.name, base.error)
+        return base
+
+    def _meta_at(self, relpath: str, path: Path, rate: float) -> ChartMeta:
+        base = self._rate1_meta(relpath, path)
         if rate == 1.0:
             return base
         return scalars_at_rate(path, base, rate)

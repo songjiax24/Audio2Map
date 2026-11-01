@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -15,10 +16,19 @@ from audio2map.dataset.split import load_split_manifest
 from audio2map.features.cond.v1.mask import DROP_ALL_P, KEEP_ALL_P, frozen_partial_mask
 from audio2map.features.cond.v1.store import ensure_v1_chart_meta
 from audio2map.dataset.v1.collate import collate_v1
+from audio2map.dataset.v1.gate import filter_v1_charts
 from audio2map.model.v1.batch import V1Batch
-from audio2map.model.v1.loss import accuracy_counts, nonpad_count, plain_ce
+from audio2map.model.v1.loss import (
+    accuracy_counts,
+    ce_by_type,
+    legal_tally,
+    nonpad_count,
+    plain_ce,
+)
 from audio2map.model.v1.model import V1ChartModel
 from audio2map.model.v1.weights import load_v1_optimizer, load_v1_state_dict
+from audio2map.features.audio.v1.store import ensure_rate1_audio
+from audio2map.tokens.v1.store import ensure_rate1_tokens
 from audio2map.train.v1.batches import FRAME_BUDGET, WINDOW_FRAC, epoch_batches
 from audio2map.train.v1.data import V1ChartDataset
 from audio2map.train.v1.lengths import (
@@ -94,8 +104,23 @@ def _set_lr(opt: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr
 
 
+def _use_expandable_segments() -> None:
+    """Ask the CUDA allocator to grow a block instead of leaving unusable holes.
+
+    The step that died had about 20.5 GiB allocated and 9.9 GiB reserved but
+    not allocatable. This must run before the caching allocator starts.
+    """
+    key = "PYTORCH_CUDA_ALLOC_CONF"
+    current = os.environ.get(key, "")
+    if "expandable_segments" in current:
+        return
+    extra = "expandable_segments:True"
+    os.environ[key] = f"{current},{extra}" if current else extra
+
+
 def train_v1(cfg: V1TrainConfig) -> dict[str, float | int | str]:
     """Run whole-chart steps. Validation and inference-style reads use rate 1."""
+    _use_expandable_segments()
     if cfg.precision not in ("bf16", "fp32"):
         raise ValueError(f"precision must be bf16 or fp32, got {cfg.precision}")
     if cfg.grad_clip <= 0.0:
@@ -115,6 +140,18 @@ def train_v1(cfg: V1TrainConfig) -> dict[str, float | int | str]:
         val_charts = val_charts[: cfg.val_limit]
     # Length and rate-1 condition caches fork. Do this before CUDA is initialized.
     length_rows = load_rate1_lengths(train_charts, root, cache_path_for(split_path))
+    train_charts, length_rows = filter_v1_charts(
+        train_charts,
+        root,
+        lengths=length_rows,
+        workers=cfg.num_workers,
+    )
+    val_charts, _ = filter_v1_charts(val_charts, root, workers=cfg.num_workers)
+    if not train_charts or length_rows is None:
+        raise RuntimeError("no train charts after the v1 gate")
+    ensure_rate1_tokens(train_charts, root, length_rows, workers=cfg.num_workers)
+    # 16 workers were slower for decode and mel on this disk. Keep the train pool at 16.
+    ensure_rate1_audio(train_charts, root, length_rows, workers=8)
     ensure_v1_chart_meta(
         [chart.relpath for chart in train_charts + val_charts],
         root,
@@ -125,6 +162,8 @@ def train_v1(cfg: V1TrainConfig) -> dict[str, float | int | str]:
 
     if cfg.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available")
+    if cfg.device.startswith("cuda"):
+        logger.info("cuda allocator %s", os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""))
     device = torch.device(cfg.device)
     use_amp = cfg.precision == "bf16" and device.type == "cuda"
     if cfg.precision == "bf16" and device.type != "cuda":
@@ -146,6 +185,7 @@ def train_v1(cfg: V1TrainConfig) -> dict[str, float | int | str]:
         augment=False,
         cond_mask="none",
         seed=cfg.seed + 1,
+        record_legal=True,
     )
     model = V1ChartModel().to(device)
     model.train()
@@ -646,6 +686,22 @@ class _ValReadout:
     row: float
     beat: float
     eos: float
+    legal_top1_chart: float = 0.0
+    legal_top1_token: float = 0.0
+    legal_prob_chart: float = 0.0
+    legal_prob_token: float = 0.0
+    legal_top1_pos: float = 0.0
+    legal_top1_row: float = 0.0
+    legal_top1_beat: float = 0.0
+    legal_top1_eos: float = 0.0
+    legal_prob_pos: float = 0.0
+    legal_prob_row: float = 0.0
+    legal_prob_beat: float = 0.0
+    legal_prob_eos: float = 0.0
+    loss_pos: float = 0.0
+    loss_row: float = 0.0
+    loss_beat: float = 0.0
+    loss_eos: float = 0.0
 
 
 @torch.no_grad()
@@ -670,6 +726,18 @@ def _validate(
     chart_acc_n = 0
     correct = {name: 0 for name in ("all", "pos", "row", "beat", "eos")}
     counted = {name: 0 for name in correct}
+    legal_hits = 0
+    legal_mass = 0.0
+    legal_count = 0
+    legal_chart_top1 = 0.0
+    legal_chart_prob = 0.0
+    legal_charts = 0
+    token_types = ("pos", "row", "beat", "eos")
+    legal_type_hits = {name: 0 for name in token_types}
+    legal_type_mass = {name: 0.0 for name in token_types}
+    legal_type_count = {name: 0 for name in token_types}
+    loss_type_sum = {name: 0.0 for name in token_types}
+    loss_type_count = {name: 0 for name in token_types}
     for index, example in enumerate(charts):
         if masks is not None:
             example = replace(example, cond_m=masks[index])
@@ -692,12 +760,40 @@ def _validate(
         for name, (name_hits, name_total) in counts.items():
             correct[name] += name_hits
             counted[name] += name_total
+        for name, (type_sum, type_n) in ce_by_type(logits, targets).items():
+            loss_type_sum[name] += type_sum
+            loss_type_count[name] += type_n
+        if example.legal_ids is None:
+            raise RuntimeError("validation chart has no legal-id rows")
+        tally = legal_tally(logits, targets, example.legal_ids)
+        legal_hits += tally.hits
+        legal_mass += tally.mass
+        legal_count += tally.count
+        if tally.count:
+            legal_chart_top1 += tally.hits / tally.count
+            legal_chart_prob += tally.mass / tally.count
+            legal_charts += 1
+        for name, (type_hits, type_mass, type_n) in tally.by_type.items():
+            legal_type_hits[name] += type_hits
+            legal_type_mass[name] += type_mass
+            legal_type_count[name] += type_n
     if seen == 0 or token_count == 0:
         raise RuntimeError("validation produced no charts")
 
     def ratio(name: str) -> float:
         total = counted[name]
         return correct[name] / total if total else 0.0
+
+    def loss_type(name: str) -> float:
+        total = loss_type_count[name]
+        return loss_type_sum[name] / total if total else 0.0
+
+    def legal_type(name: str, *, mass: bool) -> float:
+        total = legal_type_count[name]
+        if not total:
+            return 0.0
+        value = legal_type_mass[name] if mass else legal_type_hits[name]
+        return value / total
 
     return _ValReadout(
         loss_chart=chart_total / seen,
@@ -708,6 +804,26 @@ def _validate(
         row=ratio("row"),
         beat=ratio("beat"),
         eos=ratio("eos"),
+        legal_top1_chart=(
+            legal_chart_top1 / legal_charts if legal_charts else 0.0
+        ),
+        legal_top1_token=legal_hits / legal_count if legal_count else 0.0,
+        legal_prob_chart=(
+            legal_chart_prob / legal_charts if legal_charts else 0.0
+        ),
+        legal_prob_token=legal_mass / legal_count if legal_count else 0.0,
+        legal_top1_pos=legal_type("pos", mass=False),
+        legal_top1_row=legal_type("row", mass=False),
+        legal_top1_beat=legal_type("beat", mass=False),
+        legal_top1_eos=legal_type("eos", mass=False),
+        legal_prob_pos=legal_type("pos", mass=True),
+        legal_prob_row=legal_type("row", mass=True),
+        legal_prob_beat=legal_type("beat", mass=True),
+        legal_prob_eos=legal_type("eos", mass=True),
+        loss_pos=loss_type("pos"),
+        loss_row=loss_type("row"),
+        loss_beat=loss_type("beat"),
+        loss_eos=loss_type("eos"),
     )
 
 
@@ -721,6 +837,22 @@ _VAL_FIELDS = (
     "row",
     "beat",
     "eos",
+    "legal_top1_chart",
+    "legal_top1_token",
+    "legal_prob_chart",
+    "legal_prob_token",
+    "legal_top1_pos",
+    "legal_top1_row",
+    "legal_top1_beat",
+    "legal_top1_eos",
+    "legal_prob_pos",
+    "legal_prob_row",
+    "legal_prob_beat",
+    "legal_prob_eos",
+    "loss_pos",
+    "loss_row",
+    "loss_beat",
+    "loss_eos",
 )
 
 
@@ -747,6 +879,22 @@ def _store_val(last: dict[str, float | int], branch: str, readout: _ValReadout) 
         "row": readout.row,
         "beat": readout.beat,
         "eos": readout.eos,
+        "legal_top1_chart": readout.legal_top1_chart,
+        "legal_top1_token": readout.legal_top1_token,
+        "legal_prob_chart": readout.legal_prob_chart,
+        "legal_prob_token": readout.legal_prob_token,
+        "legal_top1_pos": readout.legal_top1_pos,
+        "legal_top1_row": readout.legal_top1_row,
+        "legal_top1_beat": readout.legal_top1_beat,
+        "legal_top1_eos": readout.legal_top1_eos,
+        "legal_prob_pos": readout.legal_prob_pos,
+        "legal_prob_row": readout.legal_prob_row,
+        "legal_prob_beat": readout.legal_prob_beat,
+        "legal_prob_eos": readout.legal_prob_eos,
+        "loss_pos": readout.loss_pos,
+        "loss_row": readout.loss_row,
+        "loss_beat": readout.loss_beat,
+        "loss_eos": readout.loss_eos,
     }
     for name, value in values.items():
         last[f"val_{branch}_{name}"] = value
@@ -755,17 +903,40 @@ def _store_val(last: dict[str, float | int], branch: str, readout: _ValReadout) 
 def _log_val(step: int, branch: str, readout: _ValReadout) -> None:
     logger.info(
         "val step %s %s loss_chart %.4f loss_token %.4f "
-        "acc_chart %.3f acc_token %.3f POS %.3f ROW %.3f BEAT %.3f EOS %.3f",
+        "loss_POS %.4f loss_ROW %.4f loss_BEAT %.4f loss_EOS %.4f "
+        "acc_chart %.3f acc_token %.3f POS %.3f ROW %.3f BEAT %.3f EOS %.3f "
+        "legal_top1_chart %.3f legal_top1 %.3f "
+        "legal_prob_chart %.3f legal_prob %.3f "
+        "legal_top1_POS %.3f legal_top1_ROW %.3f "
+        "legal_top1_BEAT %.3f legal_top1_EOS %.3f "
+        "legal_prob_POS %.3f legal_prob_ROW %.3f "
+        "legal_prob_BEAT %.3f legal_prob_EOS %.3f",
         step,
         branch,
         readout.loss_chart,
         readout.loss_token,
+        readout.loss_pos,
+        readout.loss_row,
+        readout.loss_beat,
+        readout.loss_eos,
         readout.acc_chart,
         readout.acc_token,
         readout.pos,
         readout.row,
         readout.beat,
         readout.eos,
+        readout.legal_top1_chart,
+        readout.legal_top1_token,
+        readout.legal_prob_chart,
+        readout.legal_prob_token,
+        readout.legal_top1_pos,
+        readout.legal_top1_row,
+        readout.legal_top1_beat,
+        readout.legal_top1_eos,
+        readout.legal_prob_pos,
+        readout.legal_prob_row,
+        readout.legal_prob_beat,
+        readout.legal_prob_eos,
     )
 
 
@@ -776,8 +947,8 @@ def _mix_readout(
 ) -> _ValReadout:
     """Training mixture: keep-all, Bernoulli partial, drop-all.
 
-    Type accuracies stay on each branch. The mixture carries loss and the
-    overall accuracy only.
+    Type accuracies and type losses stay on each branch. The mixture carries
+    the two overall losses and the two overall accuracies only.
     """
     partial_p = 1.0 - KEEP_ALL_P - DROP_ALL_P
 
@@ -824,6 +995,7 @@ def _to_device(batch: V1Batch, device: torch.device) -> V1Batch:
         token_mask=move(batch.token_mask),
         mel=move(batch.mel),
         n_frames=move(batch.n_frames),
+        legal_ids=batch.legal_ids,
     )
 
 
@@ -973,7 +1145,9 @@ def load_train_checkpoint(
     if "scaler" in ckpt:
         logger.warning("checkpoint scaler is unused; v1 bf16 training has no GradScaler")
 
-    _check_resume_identity(ckpt, path, seed=seed, n_train=n_train, split_path=split_path)
+    restart_order = _check_resume_identity(
+        ckpt, path, seed=seed, n_train=n_train, split_path=split_path
+    )
     legacy = load_v1_state_dict(model, ckpt["model"])
     load_v1_optimizer(model, opt, ckpt["optimizer"], legacy=legacy)
     if "ca_train" in ckpt:
@@ -981,7 +1155,9 @@ def load_train_checkpoint(
     else:
         logger.warning("checkpoint has no ca_train; keeping %s", model.ca_train)
     step = int(ckpt["step"])
-    epoch, order_index = _restore_cursor(ckpt, dataset, device)
+    epoch, order_index = _restore_cursor(
+        ckpt, dataset, device, restart_order=restart_order
+    )
     logger.info(
         "resumed %s at step %s epoch %s order_index %s",
         path,
@@ -1023,14 +1199,11 @@ def _check_resume_identity(
     seed: int,
     n_train: int,
     split_path: Path,
-) -> None:
+) -> bool:
+    """True when the saved chart cursor belongs to a different chart list."""
     if "seed" in ckpt and int(ckpt["seed"]) != seed:
         raise RuntimeError(
             f"checkpoint seed {ckpt['seed']} != run seed {seed} ({path})"
-        )
-    if "n_train" in ckpt and int(ckpt["n_train"]) != n_train:
-        raise RuntimeError(
-            f"checkpoint n_train {ckpt['n_train']} != this run {n_train} ({path})"
         )
     saved_split = ckpt.get("split_manifest")
     if saved_split is not None and Path(saved_split).resolve() != split_path.resolve():
@@ -1039,15 +1212,28 @@ def _check_resume_identity(
         )
     if "seed" not in ckpt or "n_train" not in ckpt:
         logger.warning("checkpoint has no seed or n_train; not checking the data order")
+    if "n_train" in ckpt and int(ckpt["n_train"]) != n_train:
+        logger.warning(
+            "checkpoint n_train %s != this run %s; data order starts again at epoch 0",
+            ckpt["n_train"],
+            n_train,
+        )
+        return True
+    return False
 
 
 def _restore_cursor(
     ckpt: dict,
     dataset: V1ChartDataset,
     device: torch.device,
+    *,
+    restart_order: bool = False,
 ) -> tuple[int, int]:
     have_cursor = all(key in ckpt for key in ("epoch", "order_index", "train_rng"))
-    if have_cursor:
+    if restart_order:
+        epoch = 0
+        order_index = 0
+    elif have_cursor:
         dataset.set_rng_state(ckpt["train_rng"])
         epoch = int(ckpt["epoch"])
         order_index = int(ckpt["order_index"])

@@ -18,3 +18,4 @@
 | R10 | 2.4 中“`4e-8` 到 `2e-6` 之间没有 section”这一说法：exports 的分档表只能确认 `(1e-7, 1e-6]` 为 0，`(1e-8, 1e-7]` 有 2 个；更细的边界来自 10-21 的讨论记录 | 不影响 EPS=1e-6 的选择，可在实现时顺带核对 | 2.4 |
 | R11 | 倍速：official SR 用 `set_clock_rate`，MSD 用 `music_rate`，Rework 用 `speed_rate`（时间除以 rate）。不加 rate 维。推理 rate=1 | 已锁定，2026-10-25 | 6.6 |
 | R12 | Importance 是否替换六维 Pattern 的 Amount 时间份额 | 待办；当前否，cond 继续用方案 A 的 Amount | 6.6 |
+| R13 | 过渡期三处各有一份，统一时留下：物件行并入 `osu/v1/export.py`；RoPE 留下能处理小数位置的一份；`SAMPLE_RATE` 与 `HOP` 只留 `utils/time.py` | 待统一，现在不合并 | 11.3 |

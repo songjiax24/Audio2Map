@@ -1,10 +1,50 @@
 # Audio2Map v1 设计文档（唯一依据）
 
-- 版本：草稿 v0.12，2026-10-30 (UTC+8)
+- 版本：草稿 v0.22，2026-10-31 (UTC+8)
 - 适用对象：在仓库中实现 v1 的 Cursor
 - 来源：(1) 设计决策记录（10-07 至 10-21，后定的覆盖先定的）；(2) 10-07 至 10-17 的架构讨论记录；(3) 仓库 `exports/` 下的分析结果（只读核对）。
 
 ## 修订记录
+
+v0.22（2026-10-31）：
+
+1. 第 7.3 节：训练在第一次使用 CUDA 之前把分配器设成 `expandable_segments:True`。第 2500 步之后的失败是 reserved 里约 9.9 GiB 空块拼不出 1.3 GiB，不是那一批的激活超过了预算。
+
+v0.21（2026-10-31）：
+
+1. 第 7.3 节：检查点里的 `n_train` 和这一轮名单张数不一致时，权重、优化器和 step 照常恢复，数据顺序从 epoch 0 重走，不沿用 `order_index` 和 `train_rng`。
+
+v0.20（2026-10-31）：
+
+1. 第 1.2 节与第 1.4 节：开训时对 train 和 val 做一次门，不改 split。谱面拒绝解析失败、空谱、非 4K、红线错误和 `encode_chart` 的结构错误。不因变速或拍号丢谱。音频只在无效包和时间戳超前同时出现时丢掉。训练和推理用这一条。只出现其中一条的留下。
+
+v0.19（2026-10-30）：
+
+1. 第 7.3 节：原速 PCM 按音频文件、原速 mel 按覆盖窗口，在开训前写入 `processed/v1_audio`。同一窗口只存一份。源文件大小一致就不再解码；rate 为 1 且窗口对得上就不再算 mel。变速用这份 PCM 做 soxr，mel 重算。
+
+v0.18（2026-10-30）：
+
+1. 第 7.3 节：原速 token 串在开训前写入 `processed/v1_tokens`。镜像把每个 `<ROW_>` 的四位倒序，不再为镜像重打标签。时长对不上就现场编码。
+
+v0.17（2026-10-30）：
+
+1. 第 7.3 节：原速 meta 里十个随时钟变化的标量都是有限数时，变速后的数值改到 worker 里算，和这张谱的解码叠在一起。mask 仍在主进程用这份 `m_real` 抽。缺任一维时仍在主进程算完再抽。
+
+v0.16（2026-10-30，按用户决定修订）：
+
+1. 第 7.3 节：验证 loss 再按金标的 `POS`、`ROW`、`BEAT`、`EOS` 分开。分类是该类 token 的交叉熵平均，该类没有 token 时记 0。不进 `mix`，也不参与早停。
+
+v0.15（2026-10-30，按用户决定修订）：
+
+1. 第 7.3 节：`legal_top1` 和 `legal_probability` 再按金标的 `POS`、`ROW`、`BEAT`、`EOS` 分开。分类按该类 token 加权，该类没有 token 时记 0。不进 `mix`，也不参与早停。
+
+v0.14（2026-10-30，按用户决定修订）：
+
+1. 第 7.3 节：验证每支另记 `legal_top1` 和 `legal_probability` 的按谱平均与按 token 加权。合法集由金标和网格决定，三支共用一次游标。不进 `mix`，也不参与早停。
+
+v0.13（2026-10-30，按用户决定修订）：
+
+1. 第 11.3 节：过渡期同一行为可以暂时各有一份。统一时留下哪一份写在下面。现在先不合并。
 
 v0.12（2026-10-30，按用户决定修订）：
 
@@ -108,6 +148,7 @@ Timing（红线）是**输入条件**，不是模型的预测目标。训练时�
 - 已排除：Florn (set 2322253)、Awakening Promise (1743718)、Cyclic Universe Theory (2298998)。
 - 保留：Bounce (2080086)，在 216.078 s 处有 448 样本（10.16 ms）的容器空隙，但没有无效包，各解码器结果一致。
 - 与 BASS 解码结果有差异的 33 个文件 / 112 张谱：保留，并记录在案。
+- 运行时不按 set id 排除。判定读这次 ffmpeg 日志：无效包和时间戳超前两条都在，才拒绝。训练在组数据集之前丢掉用这份音频的谱；推理报「音频损坏」。只打出无效包、或只有时间戳空隙（Bounce）的都留下。
 
 ### 1.3 谱面语料与分类【已锁定，10-19】
 
@@ -135,6 +176,7 @@ Timing（红线）是**输入条件**，不是模型的预测目标。训练时�
 - hold 跨过红线：不额外过滤。
 - 两条红线时间完全相同 → 整张谱拒绝（见 2.6）。
 - 统计并报告每一种拒绝原因的数量。
+- 组 train / val 数据集之前做一次，不改 split 文件。解析失败（非法物件、非法时间点）、没有物件、打不开的谱，同样整谱拒绝。这些发生在端点检查之前。`VARIABLE_BPM`、`VARIABLE_METER`、`METER_NOT_4` 仍不使用。
 
 ### 1.5 划分（split）【已锁定】
 
@@ -444,17 +486,18 @@ k* = round((t_red − s_i) / L_i)
   - 变速概率 0.2。命中时 `rate ~ Uniform[1, 1.5)`（numpy 的右开区间）。不抽慢于原速的时钟，增强后的帧数不超过 rate 1。先在原速的整数毫秒上打标签，`<POS>`、`<ROW>`、`<BEAT>` 不随 rate 改变；镜像先于打标签，所以镜像后的 token 串在每个 rate 上都相同。然后把已经建成的 BeatGrid 和红线时间除以 rate。音频用已锁定的 soxr HQ，把时钟设成 `rate`：时长变为 `1/rate`，音高随时钟走。这不是单独的 pitch 增强，也不是相位声码器。不再把物件毫秒四舍五入后重新送进 V80 窗口；那个窗口只逆 osu 的 floor。游标时间、φ/ψ、`log BPM`、`u` 在缩放后的网格上重算。soxr 把采样数收到 `round(n/rate)`，不因此增删拍。
   - 难度标量见 §6.6。条件向量不加 rate 维。
   - 不接 Mug 的 interval-mirror、随机列置换、独立 pitch。
+- 开训过滤【已锁定，2026-10-31】。train 和 val 在长度缓存之后、写入 token / 音频缓存之前过同一道门。不改 split。规则见第 1.2 和 1.4 节。被拒的谱不进入数据集。
 - 训练 batch【已锁定，2026-10-29】。一条样本仍是整曲。切窗口和装批都用 rate-1 的 `n_frames`，不用增强之后的帧数，也不用 token 数。rate 在装批之后才抽，只会使这一步的前向更短。
   - 按 rate-1 帧数排序。从下一张 `f` 帧的谱起，把后面所有 `frames ≤ f * 1.10` 的谱划进同一个窗口，窗口互不重叠。窗口内部打乱，窗口保持从短到长。然后按这个顺序贪心装批：`n * max(frames) ≤ 458752`（14×32768，即测过的 2×262144 乘积的 7/8）。最后再打乱 batch 顺序。两次打乱都用 `default_rng(seed + epoch)`。帧数不是正数的谱单独成批，混进最后这次打乱。
   - 458752 来自 activation checkpoint 开着时的整步测量：乘积 524288 放得下，但 reserved 大约 30.7 GiB，挨着先前 reserved 30.75 GiB 的 cuDNN 失败。超过 229376 帧的谱配不成对，由这条预算单独成批，不另设跳过。
-  - 不按长度跳过。OOM 不捕获，本轮中止，从最近的 `step_N.pt` 续跑；同一 `(seed, epoch)` 会再次走到这一批。cuDNN 内部错误同样中止。每次验证前调用一次 `torch.cuda.empty_cache()`，避免上一步留下的 reserved 把下一次分配切碎。
-  - 增强和条件 mask 在主进程按谱序抽取（先 `sample_augment`，再 `sample_cond_mask`）。训练 worker 解码、soxr 和 mel。验证不抽增强、也不抽 mask，原速条件在验证 worker 里算，和这一张的解码叠在一起。原速 `ChartMeta` 存在 `processed/v1_chart_meta/manifest.jsonl`，不覆盖 v0 的 `chart_meta/manifest.jsonl`。变速仍在主进程、mask 之前算。默认 16 个 worker，spawn。下一步的特征可以和这一步的 GPU 重叠。检查点里的 `train_rng` 是已完成这批之后、预取下一批之前的状态。`order_index` 是展平后的谱计数，只在成功的 step 之后写入。旧的到达序检查点对不上这套顺序，不迁移。
-  - 验证：rate=1，不镜像。音频、token 和 `cond_x` 只建一次。条件跑三支，都先和 `m_real` 取交。full 是已有维全留。partial 是每一维独立以 0.5 留下，不走全留或全空那两支；至少两个已有维时，抽到全留或全空就重抽。每张谱的 partial 由 seed 和谱路径冻住。none 是 18 维全 0。三支分开记 `loss_chart`、`loss_token`、`acc_chart`、`acc_token` 和 `POS`、`ROW`、`BEAT`、`EOS`。`loss_chart` 是每张谱的 token 平均再对谱无权平均。`acc_chart` 是每张谱的 token 准确率再对谱无权平均。`loss_token` 是 `Σ(L_c * N_c) / Σ N_c`，`acc_token` 是全部非 `<PAD>` target 里预测正确的比例，`N_c` 是非 `<PAD>` 的 target 数。`POS`、`ROW`、`BEAT`、`EOS` 按该类 token 加权，某一类没有 token 时记 0，不进混合。和 train loss、train acc 对照的是 `0.1·full + 0.8·partial + 0.1·none`，记成 `mix`，含两个 loss 和两个总准确率，不代替三支。数据错误可以记日志并跳过，一次验证大约 32 条到顶；`RuntimeError`（含 OOM）直接抛出。缓存留在内存里，同一次进程之后只换 `cond_m` 再做前向。训练集不放进内存。
+  - 不按长度跳过。OOM 不捕获，本轮中止，从最近的 `step_N.pt` 续跑；同一 `(seed, epoch)` 会再次走到这一批。cuDNN 内部错误同样中止。每次验证前调用一次 `torch.cuda.empty_cache()`，避免上一步留下的 reserved 把下一次分配切碎。训练进程在第一次使用 CUDA 之前把分配器设成 `expandable_segments:True`，让 reserved 里的空块还能接着长；环境里已经写了这项就不覆盖。装批预算不因此改。
+  - 增强和条件 mask 在主进程按谱序抽取（先 `sample_augment`，再 `sample_cond_mask`）。原速 PCM 按音频文件、原速 mel 按覆盖窗口，在开训前写入 `processed/v1_audio`，同一窗口只存一份。训练 worker 读到且源文件大小一致就不再解码；rate 为 1 且窗口对得上就不再算 mel。对不上就现场解码、现场算 mel。变速用缓存里的 PCM 做 soxr，mel 重算。原速 token 串在开训前写入 `processed/v1_tokens`（int16，一份）。镜像把每个 `<ROW_>` 的四位数字倒序。worker 读到且 `t_audio_ms` 一致就不再打标签；对不上就现场编码。验证不抽增强、也不抽 mask，原速条件在验证 worker 里算，和这一张的解码叠在一起。原速 `ChartMeta` 存在 `processed/v1_chart_meta/manifest.jsonl`，不覆盖 v0 的 `chart_meta/manifest.jsonl`。原速 meta 里 `official_sr`、`rework_sr` 和八维 MSD 都是有限数时，mask 仍用这份 `m_real` 在主进程抽，变速后的数值在 worker 里算，和这张谱的解码叠在一起。缺任一维时仍在主进程算完再抽 mask，缺的维被补上之后才能被打开。worker 里这次计算若抛错，这张谱跳过，mask 的随机数已经抽过。默认 16 个 worker，spawn。下一步的特征可以和这一步的 GPU 重叠。检查点里的 `train_rng` 是已完成这批之后、预取下一批之前的状态。`order_index` 是展平后的谱计数，只在成功的 step 之后写入。旧的到达序检查点对不上这套顺序，不迁移。
+  - 验证：rate=1，不镜像。音频、token 和 `cond_x` 只建一次。条件跑三支，都先和 `m_real` 取交。full 是已有维全留。partial 是每一维独立以 0.5 留下，不走全留或全空那两支；至少两个已有维时，抽到全留或全空就重抽。每张谱的 partial 由 seed 和谱路径冻住。none 是 18 维全 0。三支分开记 `loss_chart`、`loss_token`、`acc_chart`、`acc_token` 和 `POS`、`ROW`、`BEAT`、`EOS`。`loss_chart` 是每张谱的 token 平均再对谱无权平均。`acc_chart` 是每张谱的 token 准确率再对谱无权平均。`loss_token` 是 `Σ(L_c * N_c) / Σ N_c`，`acc_token` 是全部非 `<PAD>` target 里预测正确的比例，`N_c` 是非 `<PAD>` 的 target 数。`POS`、`ROW`、`BEAT`、`EOS` 准确率按该类 token 加权，某一类没有 token 时记 0，不进混合。`loss` 也按金标的这四类分开，是该类 token 的交叉熵平均，该类没有 token 时记 0，不进 `mix`，也不参与早停。每支另记 `legal_top1` 和 `legal_probability` 的按谱平均与按 token 加权，并按金标的 `POS`、`ROW`、`BEAT`、`EOS` 分开。分类只按该类 token 加权，该类没有 token 时记 0。合法集由金标和网格决定，三支共用一次游标。总数和分类都不进 `mix`，也不参与早停。和 train loss、train acc 对照的是 `0.1·full + 0.8·partial + 0.1·none`，记成 `mix`，含两个 loss 和两个总准确率，不代替三支。数据错误可以记日志并跳过，一次验证大约 32 条到顶；`RuntimeError`（含 OOM）直接抛出。缓存留在内存里，同一次进程之后只换 `cond_m` 再做前向。训练集不放进内存。
 - Activation checkpoint【默认开，2026-10-27】。正式训练对每一个 encoder 层和每一个 decoder 层调用 `torch.utils.checkpoint`（`use_reentrant=False`）。层里面仍是原来的 Flash 滑窗自注意力、Flex cross-attention 和 decoder 的 AdaLN-Zero，不改窗口，不改 20 维时间特征。反向时按层重算，不把这 16 层内部的激活留到反传；每层只留下输入。权重、Adam 状态和这一步共用的 Flex BlockMask 两边都在，所以整步峰值不会按 16 层成倍下降。序列越长，省下的激活占比越大。步时变长，因为反向多跑一遍每层。5090 上 bs=1、4096 帧、512 token、bf16、Flex 已编译、含 Adam 的第二步：关约 2.18 GiB / 0.087 s，开约 1.74 GiB / 0.157 s。这是短序列，正式长度以训练日志为准。
   - 开关是 `grad_checkpoint`，默认 `true`。关掉用 `--no-grad-checkpoint`，或在 `configs/train/train_v1.yaml` 里写 `false`。`model.eval()` 的验证不重算。权重 `step_N.pt` 不记录这个开关，续训沿用本次运行的配置。
   - 对照显存和步时：同一 seed、limit、batch，各跑两步。日志里的 `peak_gib` 是该步 `max_memory_allocated`，`step_s` 是这一步前向、反传和优化器的墙钟时间。第一步含 Flex 编译，用第二步比。
 - Decoder 1024 窗口与 8/8 层数是否足够【待定，看实验】。
-- 优化器是 AdamW，β 为 (0.9, 0.999)，ε 为 1e-8。学习率 3e-4，线性 warmup 2000 步后保持，不设余弦。`max_steps` 200000 只是上限。weight decay 0.01 只加在二维及以上的参数上，bias 和 norm 不加。一步里有多少张谱由 `frame_budget` 决定。不做梯度累积。反向之后把 token 平均交叉熵的梯度范数裁到 1.0，日志里的 `gnorm` 是裁剪前的范数。`mix` 的 `loss_token` 连续 3 次验证没有严格下降就停，采用其中最低的一次；续跑把这 3 次计数清零，最佳分数保留。检查点每 2000 步与验证同一步写入，先验证再存。原子替换完成之后只留最近 3 份 `step_*.pt`，再加 `mix` 的 `loss_token` 最低的那一份（严格更低才替换）。结束时不是 2000 倍数的那份计入最近 3 份，不更新最佳。
+- 优化器是 AdamW，β 为 (0.9, 0.999)，ε 为 1e-8。学习率 3e-4，线性 warmup 2000 步后保持，不设余弦。`max_steps` 200000 只是上限。weight decay 0.01 只加在二维及以上的参数上，bias 和 norm 不加。一步里有多少张谱由 `frame_budget` 决定。不做梯度累积。反向之后把 token 平均交叉熵的梯度范数裁到 1.0，日志里的 `gnorm` 是裁剪前的范数。`mix` 的 `loss_token` 连续 3 次验证没有严格下降就停，采用其中最低的一次；续跑把这 3 次计数清零，最佳分数保留。检查点里的 `n_train` 和这一轮名单张数不一致时，权重、优化器和 step 照常恢复，数据顺序从 epoch 0 重走，不沿用 `order_index` 和 `train_rng`。检查点每 2000 步与验证同一步写入，先验证再存。原子替换完成之后只留最近 3 份 `step_*.pt`，再加 `mix` 的 `loss_token` 最低的那一份（严格更低才替换）。结束时不是 2000 倍数的那份计入最近 3 份，不更新最佳。
 
 ---
 
@@ -580,8 +623,8 @@ Teacher 是另一张表。整首金标前缀，走和训练一样的前向，不
 | `tokens/vocab.py` | `LaneState`、`is_legal_row`、`apply_row`、`is_event_row` | 可复用；v1 词表（693）的组织方式由实现决定 |
 | `features/cond/vec.py` | v0 条件字段与归一化 | v1 不改这个文件。v1 向量在 `features/cond/v1/` |
 | `dataset/split.py` | `beatmapset_v1` 划分 | 直接用 |
-| `model/rotary.py` | RoPE | 需支持小数位置 |
-| `osu/export.py` | 写 `.osu` 的外壳 | 时间与红线规则按第 8 节，注意 `filter_notes_for_export` 会静默丢事件 |
+| `model/rotary.py` | v0 整数 RoPE | 过渡期 v1 用 `model/v1/rope.py`。统一时只留能处理小数位置的一份 |
+| `osu/export.py` | v0 写谱 | 从零文件的外壳在 `osu/v1/export.py` 的 `fresh_mania_lines`。v0 只把 BPM 和偏移收成一条时间轴再调用它。源谱改写和 `filter_notes_for_export` 留在这里，v1 不调用后者 |
 
 v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`CanonicalTiming`、`ms_to_tick`）、`dataset/filter.py`（`check_beatmap_eligibility`）、`features/audio/loader.py`、`features/audio/tick_features.py` 的对齐、`tokens/state.py`（`ChartState` 以小节为单位）、`dataset/windows.py`（16 小节窗口）。
 
@@ -617,7 +660,7 @@ v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`Can
 | `audio2map/model/v1/decode.py` | `teacher_decode`。金标前缀，交叉注意力用 cache。不出谱 |
 | `audio2map/model/v1/kv.py` | 正式逐步解码的自注意力 K/V。预投影，窗口切片。不 cat 前缀 |
 | `audio2map/generate/v1/` | 约束采样、分段 encoder（halo 4096）、写 `.osu`。不调用 v0 overlap |
-| `audio2map/osu/v1/export.py` | 只写红线，不丢 hit object。警告留给调用方 |
+| `audio2map/osu/v1/export.py` | 从零 mania 外壳 `fresh_mania_lines`，v0 从零路径也调用它。只写红线，不丢 hit object。警告留给调用方 |
 | `audio2map/cli/train_v1.py` | `audio2map-train-v1`。配置是 `configs/train/train_v1.yaml`，不是 `train_multi.yaml` |
 | `audio2map/cli/infer_v1.py` | `audio2map-infer-v1`。不是 `audio2map-infer` |
 | `tests/` 下与包同构的 `v1/` | 单元测试 |
@@ -626,6 +669,7 @@ v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`Can
 
 原则：
 
+- 过渡期同一行为可以暂时各有一份。统一时留下的是：物件行并入 `osu/v1/export.py`（现在 v0 的 `note_to_hit_object` 与 `generate/v1/notes.py` 的 `_hit_line` 各写一份）；RoPE 留下能处理小数位置的一份（现在 `model/rotary.py` 与 `model/v1/rope.py` 各写一份）；采样率与 hop 只留 `utils/time.py`（现在 `features/audio/v1/constants.py` 又写了一遍 `SAMPLE_RATE` 和 `HOP`）。现在先不合并。
 - 遵守现有分层，依赖方向由 import-linter 强制，不得新增反向依赖。
 - `EPS` 在全项目只定义一处。
 - 单元测试放在 `tests/` 下，覆盖第 2、3、5 节的边界情况和第 6.1 节的分段一致性。

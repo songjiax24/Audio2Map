@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 
@@ -37,3 +38,5 @@ class V1Batch:
     mel: torch.Tensor | None = None
     # Real stem-frame count per example, before batch padding.
     n_frames: torch.Tensor | None = None
+    # One int16 array of legal ids per non-PAD target. Validation only.
+    legal_ids: tuple[np.ndarray, ...] | None = None

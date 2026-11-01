@@ -26,6 +26,11 @@ _PACKET_FAILURES = (
     "error submitting packet to decoder",
     "header missing",
 )
+# A jump or a container gap. Either one without a dropped packet stays.
+_TIMESTAMP_AHEAD = (
+    "timestamp discontinuity",
+    "non monotonically increasing dts",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +44,7 @@ class DecodedAudio:
     ffmpeg_version: str
     soxr_version: str
     timeline_broken: bool
+    timeline_spliced: bool
     ffmpeg_log: str
 
     @property
@@ -145,15 +151,54 @@ def resample_hq(mono: np.ndarray, native_rate: int, target_rate: int = SAMPLE_RA
 
 
 def timeline_broken(ffmpeg_log: str) -> bool:
-    """True when ffmpeg 7.1.1 reports a decoder packet failure.
+    """True when ffmpeg reports a decoder packet failure.
 
-    The excluded sets log ``Invalid data found when processing input``
-    (and, for the mp3, ``Header missing``). They do not log a timestamp
-    discontinuity. Bounce logs only ``non monotonically increasing dts``
-    and stays in the corpus, so that line alone is not a failure.
+    Packet text alone is not the reject rule. :func:`timeline_spliced` also
+    requires a timestamp jump. Bounce logs only ``non monotonically increasing
+    dts`` and stays.
     """
     lowered = ffmpeg_log.lower()
     return any(phrase in lowered for phrase in _PACKET_FAILURES)
+
+
+def timeline_spliced(ffmpeg_log: str) -> bool:
+    """True when a dropped packet and a timestamp jump are both in the log.
+
+    Training and inference reject this audio. A packet line alone stays, and
+    a timestamp line alone stays (Bounce).
+    """
+    if not timeline_broken(ffmpeg_log):
+        return False
+    lowered = ffmpeg_log.lower()
+    return any(phrase in lowered for phrase in _TIMESTAMP_AHEAD)
+
+
+def _pcm_command(exe: str, source: Path) -> list[str]:
+    return [
+        exe,
+        "-hide_banner",
+        "-v",
+        "info",
+        "-i",
+        str(source),
+        "-f",
+        "f32le",
+        "-acodec",
+        "pcm_f32le",
+        "pipe:1",
+    ]
+
+
+def ffmpeg_decode_log(path: Path, *, binary: str | None = None) -> str:
+    """stderr of the same pcm decode ``decode_audio`` runs. Stdout is discarded."""
+    exe = binary or ffmpeg_binary()
+    decoded = subprocess.run(
+        _pcm_command(exe, Path(path)),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return decoded.stderr.decode("utf-8", "replace")
 
 
 def decode_audio(path: Path, *, binary: str | None = None) -> DecodedAudio:
@@ -164,19 +209,7 @@ def decode_audio(path: Path, *, binary: str | None = None) -> DecodedAudio:
     source = Path(path)
     native_rate, channels = probe_audio(source, ffprobe=ffprobe_binary(exe))
     decoded = subprocess.run(
-        [
-            exe,
-            "-hide_banner",
-            "-v",
-            "info",
-            "-i",
-            str(source),
-            "-f",
-            "f32le",
-            "-acodec",
-            "pcm_f32le",
-            "pipe:1",
-        ],
+        _pcm_command(exe, source),
         capture_output=True,
         check=False,
     )
@@ -184,6 +217,7 @@ def decode_audio(path: Path, *, binary: str | None = None) -> DecodedAudio:
     if decoded.returncode != 0 and not decoded.stdout:
         raise RuntimeError(f"ffmpeg failed to decode {source}: {log[-400:]}")
     broken = timeline_broken(log)
+    spliced = timeline_spliced(log)
     if broken:
         logger.warning("timeline broken: %s", source)
     pcm = np.frombuffer(decoded.stdout, dtype="<f4")
@@ -197,5 +231,6 @@ def decode_audio(path: Path, *, binary: str | None = None) -> DecodedAudio:
         ffmpeg_version=ffmpeg_version_line(exe),
         soxr_version=str(soxr.__version__),
         timeline_broken=broken,
+        timeline_spliced=spliced,
         ffmpeg_log=log,
     )

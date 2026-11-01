@@ -16,7 +16,8 @@ import torch
 from audio2map.features.audio.v1.constants import N_MELS, SAMPLE_RATE
 from audio2map.grid.v1.timefeat import phase_rows
 from audio2map.features.audio.v1.decode import decode_audio
-from audio2map.features.audio.v1.mel import mel_span
+from audio2map.features.audio.v1.mel import MelSpan, frame_index, mel_span
+from audio2map.features.audio.v1.store import cached_rate1_mel, cached_rate1_pcm
 from audio2map.features.cond.chart import ChartMeta, compute_chart_meta
 from audio2map.features.cond.v1.mask import sample_cond_mask
 from audio2map.features.cond.v1.vec import build_cond
@@ -26,6 +27,7 @@ from audio2map.osu.schema import ManiaNote
 from audio2map.osu.v1.timing import Redline, parse_redlines_file
 from audio2map.tokens.v1.codec import EncodeResult, encode_chart
 from audio2map.tokens.v1.cursor_time import cursor_times_ms
+from audio2map.tokens.v1.state import legal_rows
 from audio2map.tokens.v1.vocab import build_vocab
 from audio2map.utils.errors import BAD_AUDIO_DURATION, ChartRejected
 
@@ -40,12 +42,19 @@ class ChartAudio:
     redlines: tuple[Redline, ...]
     pcm: np.ndarray
     t_audio_ms: float | None = None
+    audio_key: str | None = None
 
 
 def load_chart_audio(path: Path | str) -> ChartAudio:
-    """Decode one chart. The PCM and ``t_audio_ms`` come from that decode."""
-    notes, redlines, pcm, t_audio = _load_chart(path)
-    return ChartAudio(notes=tuple(notes), redlines=redlines, pcm=pcm, t_audio_ms=t_audio)
+    """Decode one chart, or read the rate-1 PCM cache when the file size matches."""
+    notes, redlines, pcm, t_audio, audio_key = _load_chart(path)
+    return ChartAudio(
+        notes=tuple(notes),
+        redlines=redlines,
+        pcm=pcm,
+        t_audio_ms=t_audio,
+        audio_key=audio_key,
+    )
 
 
 def build_v1_example(
@@ -55,6 +64,7 @@ def build_v1_example(
     cond_mask: CondMask | torch.Tensor | None = "none",
     rng: np.random.Generator | None = None,
     encoded: EncodeResult | None = None,
+    record_legal: bool = False,
 ) -> V1Batch:
     """Teacher-forcing batch for the whole chart. ``meta.error`` does not reject it.
 
@@ -65,13 +75,21 @@ def build_v1_example(
     already carries the scaled redlines, PCM, and grid.
     """
     resolved = _resolve_meta(source, meta)
-    _notes, redlines, pcm, t_audio = _load_chart(source)
+    _notes, redlines, pcm, t_audio, audio_key = _load_chart(source)
     if encoded is None:
         if not np.isfinite(t_audio) or t_audio <= 0.0:
             raise ChartRejected(BAD_AUDIO_DURATION, f"T_audio={t_audio}")
         encoded = encode_chart(_notes, redlines, t_audio)
     grid = encoded.grid
-    span = mel_span(pcm, grid.coverage_start_ms, grid.coverage_end_ms)
+    frame_lo = frame_index(grid.coverage_start_ms)
+    frame_hi = frame_index(grid.coverage_end_ms)
+    cached_mel = None
+    if audio_key is not None and np.isfinite(t_audio):
+        cached_mel = cached_rate1_mel(audio_key, float(t_audio), frame_lo, frame_hi)
+    if cached_mel is None:
+        span = mel_span(pcm, grid.coverage_start_ms, grid.coverage_end_ms)
+    else:
+        span = MelSpan(cached_mel, frame_lo, frame_hi)
     n_frames = span.frame_hi - span.frame_lo
     if n_frames <= 0 or span.mel.shape[1] == 0:
         raise ChartRejected(BAD_AUDIO_DURATION, "audio span has no stem frames")
@@ -110,6 +128,7 @@ def build_v1_example(
         token_mask=torch.ones(1, length - 1, dtype=torch.bool),
         mel=mel,
         n_frames=torch.tensor([n_frames], dtype=torch.long),
+        legal_ids=legal_rows(token_ids, grid) if record_legal else None,
     )
 
 
@@ -144,18 +163,38 @@ def _resolve_meta(source: Path | str | ChartAudio, meta: ChartMeta | dict | None
 
 def _load_chart(
     source: Path | str | ChartAudio,
-) -> tuple[list[ManiaNote], tuple[Redline, ...], np.ndarray, float]:
+) -> tuple[list[ManiaNote], tuple[Redline, ...], np.ndarray, float, str | None]:
     if isinstance(source, ChartAudio):
         pcm = np.asarray(source.pcm, dtype=np.float32)
         if source.t_audio_ms is None:
             t_audio = float(pcm.shape[0]) / float(SAMPLE_RATE) * 1000.0
         else:
             t_audio = float(source.t_audio_ms)
-        return list(source.notes), tuple(source.redlines), pcm, t_audio
+        return list(source.notes), tuple(source.redlines), pcm, t_audio, source.audio_key
     path = Path(source)
     if not is_mania_4k(path):
         raise ValueError(f"not a 4K mania chart: {path}")
     beatmap = parse_beatmap(path)
     redlines = parse_redlines_file(path).redlines
-    decoded = decode_audio(chart_audio_path(path))
-    return list(beatmap.notes), redlines, decoded.y, decoded.t_audio_ms
+    audio_key, cached_pcm, cached_t = _cached_pcm(path)
+    if cached_pcm is None:
+        decoded = decode_audio(chart_audio_path(path))
+        return list(beatmap.notes), redlines, decoded.y, decoded.t_audio_ms, audio_key
+    return list(beatmap.notes), redlines, cached_pcm, float(cached_t), audio_key
+
+
+def _cached_pcm(path: Path) -> tuple[str | None, np.ndarray | None, float | None]:
+    """``(audio key, pcm, t_audio_ms)``. A miss still returns the key when known."""
+    from audio2map.utils.paths import raw_dir
+
+    try:
+        audio_path = chart_audio_path(path)
+        key = str(audio_path.resolve().relative_to(raw_dir().resolve()))
+        source_bytes = audio_path.stat().st_size
+    except (OSError, ValueError, FileNotFoundError):
+        return None, None, None
+    hit = cached_rate1_pcm(key, source_bytes)
+    if hit is None:
+        return key, None, None
+    pcm, t_audio = hit
+    return key, pcm, t_audio

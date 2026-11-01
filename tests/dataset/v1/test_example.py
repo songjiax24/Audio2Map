@@ -213,6 +213,38 @@ def test_collate_pads_without_marking_silence_as_pad() -> None:
     assert torch.isfinite(loss)
 
 
+def test_cached_mel_skips_computing_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    chart = _chart(200.0)
+    meta = _meta()
+    first = build_v1_example(chart, meta=meta)
+    lo = int(first.frame_lo[0])
+    hi = lo + int(first.n_frames[0])
+    stored = first.mel[0].numpy().copy()
+
+    def refuse(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("mel was recomputed")
+
+    def hit(audio: str, t_audio: float, frame_lo: int, frame_hi: int) -> np.ndarray | None:
+        del t_audio
+        if audio == "set/a.mp3" and frame_lo == lo and frame_hi == hi:
+            return stored
+        return None
+
+    monkeypatch.setattr("audio2map.dataset.v1.example.mel_span", refuse)
+    monkeypatch.setattr("audio2map.dataset.v1.example.cached_rate1_mel", hit)
+    again = build_v1_example(
+        ChartAudio(
+            notes=chart.notes,
+            redlines=chart.redlines,
+            pcm=chart.pcm,
+            t_audio_ms=200.0,
+            audio_key="set/a.mp3",
+        ),
+        meta=meta,
+    )
+    assert torch.equal(again.mel, first.mel)
+
+
 def _first_4k_osu() -> Path | None:
     root = raw_dir()
     if not root.is_dir():
