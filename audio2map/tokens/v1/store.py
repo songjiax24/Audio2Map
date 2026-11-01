@@ -18,9 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from audio2map.dataset.split import ChartSnapshot
 from audio2map.tokens.v1.vocab import TOKENIZER_VERSION, build_vocab, invert_vocab
-from audio2map.train.v1.lengths import ChartLength
 from audio2map.utils.paths import v1_token_dir
 
 logger = logging.getLogger(__name__)
@@ -28,7 +26,7 @@ logger = logging.getLogger(__name__)
 TOKEN_CACHE_VERSION = 1
 _KIND = "v1-rate1-tokens"
 # One sample at 22050 Hz is about 0.045 ms. JSON and a second decode stay inside this.
-_AUDIO_ABS_TOL_MS = 1e-3
+AUDIO_ABS_TOL_MS = 1e-3
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +50,7 @@ class TokenCache:
         record = self.records.get(relpath)
         if record is None or record.error is not None or record.n <= 0:
             return None
-        if not math.isclose(record.t_audio_ms, t_audio_ms, rel_tol=0.0, abs_tol=_AUDIO_ABS_TOL_MS):
+        if not math.isclose(record.t_audio_ms, t_audio_ms, rel_tol=0.0, abs_tol=AUDIO_ABS_TOL_MS):
             return None
         invert = invert_vocab()
         piece = self.ids[record.offset : record.offset + record.n]
@@ -99,61 +97,13 @@ def load_token_cache(directory: Path) -> TokenCache:
     return TokenCache(directory, records, ids)
 
 
-def ensure_rate1_tokens(
-    charts: list[ChartSnapshot],
-    root: Path,
-    lengths: list[ChartLength],
-    *,
-    workers: int,
-    directory: Path | None = None,
-) -> TokenCache:
-    """Encode any train chart whose rate-1 tokens are missing. Returns the cache."""
+def publish_token_cache(cache: TokenCache) -> None:
+    """Remember ``cache`` for later ``cached_rate1_tokens`` calls in this process."""
     global _LOADED
-    directory = directory or v1_token_dir()
-    cached = load_token_cache(directory)
-    pending: list[tuple[str, float]] = []
-    for chart, row in zip(charts, lengths, strict=True):
-        if row.error is not None:
-            continue
-        have = cached.records.get(chart.relpath)
-        if (
-            have is not None
-            and have.error is None
-            and have.n == row.n_tokens
-            and math.isclose(
-                have.t_audio_ms,
-                row.t_audio_ms,
-                rel_tol=0.0,
-                abs_tol=_AUDIO_ABS_TOL_MS,
-            )
-        ):
-            continue
-        pending.append((chart.relpath, row.t_audio_ms))
-    if not pending:
-        logger.info("token cache hit %s (%s)", len(charts), directory)
-        _LOADED = cached
-        return cached
-    logger.info("token cache missing %s/%s; encoding rate-1 tokens", len(pending), len(charts))
-    fresh = _encode_missing(root, pending, workers=workers)
-    merged = dict(cached.records)
-    arrays: dict[str, np.ndarray] = {}
-    for relpath, record in cached.records.items():
-        if record.error is None and record.n > 0:
-            arrays[relpath] = cached.ids[record.offset : record.offset + record.n].copy()
-    for relpath, t_audio_ms, payload in fresh:
-        if isinstance(payload, str):
-            merged[relpath] = TokenRecord(relpath, t_audio_ms, 0, 0, error=payload)
-            arrays.pop(relpath, None)
-        else:
-            arrays[relpath] = payload
-            merged[relpath] = TokenRecord(relpath, t_audio_ms, 0, int(payload.shape[0]))
-    written = _write_token_cache(directory, merged, arrays)
-    _LOADED = written
-    logger.info("wrote %s", directory)
-    return written
+    _LOADED = cache
 
 
-def _encode_missing(
+def encode_missing_rate1(
     root: Path,
     pending: list[tuple[str, float]],
     *,
@@ -192,7 +142,7 @@ def _encode_ids(job: tuple[str, str, float]) -> tuple[str, float, np.ndarray | s
         return relpath, t_audio_ms, f"{type(exc).__name__}: {exc}"[:300]
 
 
-def _write_token_cache(
+def write_token_cache(
     directory: Path,
     records: dict[str, TokenRecord],
     arrays: dict[str, np.ndarray],

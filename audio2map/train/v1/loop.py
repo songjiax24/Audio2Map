@@ -28,7 +28,7 @@ from audio2map.model.v1.loss import (
 from audio2map.model.v1.model import V1ChartModel
 from audio2map.model.v1.weights import load_v1_optimizer, load_v1_state_dict
 from audio2map.features.audio.v1.store import ensure_rate1_audio
-from audio2map.tokens.v1.store import ensure_rate1_tokens
+from audio2map.train.v1.token_cache import ensure_rate1_tokens
 from audio2map.train.v1.batches import FRAME_BUDGET, WINDOW_FRAC, epoch_batches
 from audio2map.train.v1.data import V1ChartDataset
 from audio2map.train.v1.lengths import (
