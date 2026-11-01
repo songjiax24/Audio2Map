@@ -118,24 +118,29 @@ def _reference_window(
     """Same band on CPU / fp32. The mask covers the window width, not the sequence."""
     batch, heads, length, dim = q.shape
     left, right = window
-    width = left + right + 1
+    # The band is 1024 keys, but a shorter sequence has no keys outside it.
+    span = min(left + right + 1, length)
     query_index = torch.arange(length, device=q.device)
-    slots = torch.arange(width, device=q.device)
-    index = query_index[:, None] - left + slots[None, :]
+    start = (query_index - left).clamp(min=0, max=max(length - span, 0))
+    index = start[:, None] + torch.arange(span, device=q.device)[None, :]
+    low = (query_index - left)[:, None]
+    high = (query_index + right)[:, None]
+    in_band = (index >= low) & (index <= high)
     query_ok = query_index[None, :] < lengths[:, None]
-    valid = (index >= 0) & (index < lengths[:, None, None]) & query_ok[:, :, None]
+    valid = in_band[None] & (index[None] < lengths[:, None, None]) & query_ok[:, :, None]
     empty = ~valid.any(dim=-1)
     usable = valid.masked_fill(empty.unsqueeze(-1), True)
     safe = index.clamp(min=0, max=max(length - 1, 0))
-    gather_index = safe.view(1, 1, length, width, 1).expand(batch, heads, length, width, dim)
-    k_win = torch.gather(k.unsqueeze(3).expand(batch, heads, length, width, dim), 2, gather_index)
-    v_win = torch.gather(v.unsqueeze(3).expand(batch, heads, length, width, dim), 2, gather_index)
+    gather_index = safe.view(1, 1, length, span, 1).expand(batch, heads, length, span, dim)
+    gathered = k.unsqueeze(3).expand(batch, heads, length, span, dim)
+    k_win = torch.gather(gathered, 2, gather_index)
+    v_win = torch.gather(v.unsqueeze(3).expand(batch, heads, length, span, dim), 2, gather_index)
     flat = batch * length
     out = F.scaled_dot_product_attention(
         q.permute(0, 2, 1, 3).reshape(flat, heads, 1, dim),
-        k_win.permute(0, 2, 1, 3, 4).reshape(flat, heads, width, dim),
-        v_win.permute(0, 2, 1, 3, 4).reshape(flat, heads, width, dim),
-        attn_mask=usable.reshape(flat, 1, 1, width),
+        k_win.permute(0, 2, 1, 3, 4).reshape(flat, heads, span, dim),
+        v_win.permute(0, 2, 1, 3, 4).reshape(flat, heads, span, dim),
+        attn_mask=usable.reshape(flat, 1, 1, span),
     )
     out = out.view(batch, length, heads, dim).permute(0, 2, 1, 3)
     return out.masked_fill(~query_ok[:, None, :, None], 0.0)
