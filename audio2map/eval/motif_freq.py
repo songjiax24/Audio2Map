@@ -10,10 +10,12 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
+from heapq import nsmallest
 
 from audio2map.eval.motif import (
     MotifKey,
-    count_pooled_motifs,
+    MotifSequences,
+    count_sequence_motifs,
     format_motif,
     motif_length,
     parse_motif,
@@ -22,6 +24,7 @@ from audio2map.grid import CanonicalTiming
 from audio2map.osu.schema import ManiaNote
 
 SCOPES = ("lane", "hand", "row")
+LARGEST_GAPS_COUNT = 15
 LENGTH_BINS = (
     ("1", 1, 1),
     ("2", 2, 2),
@@ -79,7 +82,10 @@ class MotifCorpus:
     charts: int = 0
 
     def add_chart(self, notes: list[ManiaNote], timing: CanonicalTiming) -> None:
-        sparse, observed = count_pooled_motifs(notes, timing, self.vocab.sets())
+        self.add_sequences(MotifSequences.from_notes(notes, timing))
+
+    def add_sequences(self, sequences: MotifSequences) -> None:
+        sparse, observed = count_sequence_motifs(sequences, self.vocab.sets())
         self.charts += 1
         for scope in SCOPES:
             self.counts[scope].update(sparse[scope])
@@ -207,8 +213,12 @@ def frequency_distance(
     largest = min(rows, key=lambda row: (-row["abs"], row["motif"]))
     excess = min(rows, key=lambda row: (-row["delta"], row["motif"]))
     buckets: dict[str, list[float]] = {name: [] for name, _, _ in LENGTH_BINS}
+    length_counts = Counter()
+    length_errors = Counter()
     for row in rows:
         buckets[_bin_name(row["length"])].append(row["abs"])
+        length_counts[row["length"]] += 1
+        length_errors[row["length"]] += row["abs"]
     # A bin with no vocabulary entries has an undefined mean. It is not zero error.
     return {
         "vocabulary": len(texts),
@@ -233,6 +243,21 @@ def frequency_distance(
             name: (sum(values) / len(values) if values else None)
             for name, values in buckets.items()
         },
+        "length_contributions": {
+            name: sum(values) / len(texts) for name, values in buckets.items()
+        },
+        "by_length": {
+            str(length): {
+                "vocabulary": length_counts[length],
+                "mae_contribution": length_errors[length] / len(texts),
+            }
+            for length in sorted(length_counts)
+        },
+        "largest_gaps": [
+            {key: row[key] for key in ("motif", "length", "f_gen", "f_human", "delta")}
+            for row in nsmallest(LARGEST_GAPS_COUNT, rows,
+                                 key=lambda row: (-row["abs"], row["motif"]))
+        ],
     }
 
 
@@ -244,6 +269,7 @@ def _undefined_distance(scope_texts: tuple[str, ...], generated_obs: int, human_
         "mae": None,
         "rmse": None,
         "spearman": None,
+        "length_contributions": {}, "by_length": {}, "largest_gaps": [],
         "largest_abs_deviation": None,
         "largest_generated_excess": None,
         "length_buckets": None,

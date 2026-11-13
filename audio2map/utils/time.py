@@ -8,4 +8,5 @@ from __future__ import annotations
 
 SAMPLE_RATE = 22_050
 HOP = 128
-DT_MS = (2 * HOP) / SAMPLE_RATE * 1000.0
+MS_PER_SECOND = 1_000.0
+DT_MS = (2 * HOP) / SAMPLE_RATE * MS_PER_SECOND

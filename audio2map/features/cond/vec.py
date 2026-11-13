@@ -43,6 +43,13 @@ def canonical_bpm_to_norm(canonical_bpm: float) -> float:
     return float((canonical_bpm - 120.0) / 120.0)
 
 
+def with_canonical_bpm(cond_vec: np.ndarray, canonical_bpm_norm: float) -> np.ndarray:
+    """Copy v0 style values while anchoring the timing field to the target audio."""
+    out = cond_vec.copy()
+    out[CANONICAL_BPM_NORM_INDEX] = float(canonical_bpm_norm)
+    return out
+
+
 def canonical_bpm_norm_from_bpm(bpm: float) -> tuple[float, float, int]:
     """Return ``(canonical_bpm, canonical_bpm_norm, bpm_scale_exp)``."""
     canonical_bpm, scale_exp = canonicalize_bpm(bpm)

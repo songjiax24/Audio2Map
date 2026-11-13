@@ -12,7 +12,8 @@ from audio2map.tokens.v1.structure import EndpointKind
 
 _X = (64, 192, 320, 448)
 _SAMPLE = "0:0:0:0:"
-_SHORT_MS = 10
+CONCURRENT_MS = 2
+ALMOST_CONCURRENT_MS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,13 +86,14 @@ def _adjacent_warnings(notes: Sequence[V1Note]) -> list[str]:
             prev_start, prev_end = prior
             if start == prev_start:
                 found.append(f"column {note.col} has two events at {start} ms")
-            elif start <= prev_end + 2:
+            elif start <= prev_end + CONCURRENT_MS:
                 found.append(
                     f"column {note.col} event at {start} overlaps the one ending {prev_end}"
                 )
-            elif start - prev_end < _SHORT_MS:
+            elif start - prev_end < ALMOST_CONCURRENT_MS:
                 found.append(
-                    f"column {note.col} event at {start} is under {_SHORT_MS} ms after {prev_end}"
+                    f"column {note.col} event at {start} is under "
+                    f"{ALMOST_CONCURRENT_MS} ms after {prev_end}"
                 )
         previous[note.col] = (start, end)
     return found

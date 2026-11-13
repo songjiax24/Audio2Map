@@ -126,6 +126,7 @@ def filter_v1_charts(
     lengths: list | None = None,
     workers: int = 16,
     gate_dir: Path | None = None,
+    rejections: dict[str, str] | None = None,
 ) -> tuple[list[ChartSnapshot], list | None]:
     """Keep charts that pass §1.2 and §1.4. ``lengths`` stays aligned when given."""
     if workers < 1:
@@ -145,6 +146,8 @@ def filter_v1_charts(
                 kept_rows.append(lengths[index])
             continue
         counts[reason] += 1
+        if rejections is not None:
+            rejections[chart.relpath] = reason
         logger.warning("v1 gate drop %s: %s", chart.relpath, reason)
     summary = " ".join(f"{name}={counts[name]}" for name in sorted(counts))
     logger.info(
@@ -154,6 +157,26 @@ def filter_v1_charts(
         f" {summary}" if summary else "",
     )
     return kept_charts, kept_rows
+
+
+def cached_audio_durations(
+    root: Path, relpaths: list[str], *, gate_dir: Path | None = None
+) -> dict[str, float]:
+    """Durations from actual PCM decodes, with the gate's source-size identity checks."""
+    stored = _load_timeline(gate_dir or v1_gate_dir())
+    durations = {}
+    for relpath in relpaths:
+        key = _audio_key(root, relpath)
+        hit = stored.get(key)
+        if key is None or hit is None or hit.spliced or hit.t_audio_ms is None:
+            continue
+        try:
+            matches = hit.source_bytes == (root / key).stat().st_size
+        except OSError:
+            matches = False
+        if matches:
+            durations[relpath] = hit.t_audio_ms
+    return durations
 
 
 def _decide(

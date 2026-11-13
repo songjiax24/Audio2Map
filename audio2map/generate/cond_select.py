@@ -10,13 +10,13 @@ from pathlib import Path
 import numpy as np
 
 from audio2map.features.cond import (
-    CANONICAL_BPM_NORM_INDEX,
     COND_VEC_NAMES,
     ChartMeta,
     CondVecError,
     USER_COND_SOURCE_FIELDS,
     build_cond_vec,
     load_chart_meta_manifest,
+    with_canonical_bpm,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,9 +120,7 @@ def select_candidate_from_ranges(
 
 
 def build_final_cond_vec(candidate: CondCandidate, canonical_bpm_norm: float) -> np.ndarray:
-    out = candidate.cond_vec.copy()
-    out[CANONICAL_BPM_NORM_INDEX] = float(canonical_bpm_norm)
-    return out
+    return with_canonical_bpm(candidate.cond_vec, canonical_bpm_norm)
 
 
 def select_condition(

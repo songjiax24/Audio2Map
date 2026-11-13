@@ -19,16 +19,14 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install package (dev + train CPU)
-        run: |
-          uv sync --extra dev --extra train
-          # Ensure torch is available for model/decode tests (CPU wheel is fine in CI).
+      - name: Install package
+        run: uv sync --extra dev --extra train --extra eval
 
       - name: Ruff (syntax / pyflakes)
-        run: uv run ruff check audio2map tests tools demo/backend
+        run: uv run --no-sync ruff check audio2map tests tools demo/backend
 
       - name: Import layering (import-linter)
-        run: uv run lint-imports
+        run: uv run --no-sync lint-imports
 
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -36,5 +34,5 @@ jobs:
       - name: Pytest
         env:
           NUMBA_CACHE_DIR: ${{ runner.temp }}/numba_cache
-        run: uv run pytest
+        run: uv run --no-sync pytest
         # Data-backed tests skip when AUDIO2MAP_DATA_ROOT / raw/ is absent.

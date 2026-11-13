@@ -193,18 +193,24 @@ def test_graphed_cross_prepare_matches_a_slice() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_window_step_matches_cached_logits() -> None:
+@pytest.mark.parametrize("position_offset", [0, 2048])
+def test_window_step_matches_cached_logits(position_offset) -> None:
     torch.manual_seed(0)
     device = torch.device("cuda")
     frames = 4096
     model = V1ChartModel().to(device).eval()
+    if position_offset:
+        with torch.no_grad():
+            for layer in model.decoder:
+                for modulation in (layer.sa_mod, layer.ca_mod, layer.ff_mod):
+                    modulation.proj.bias[2 * D_MODEL :].fill_(0.1)
     context = torch.randn(1, frames, D_MODEL, device=device)
     zeros = torch.zeros(1, COND_VEC_DIM, device=device)
     cond = model.cond(zeros, zeros)
     eager_window = CrossWindow(0, frames)
     graph_window = CrossWindow(0, frames)
-    eager_kv = SelfKV(len(model.decoder))
-    graph_kv = SelfKV(len(model.decoder))
+    eager_kv = SelfKV(len(model.decoder), position_offset=position_offset)
+    graph_kv = SelfKV(len(model.decoder), position_offset=position_offset)
     token = torch.tensor([[1]], device=device)
     cursor = torch.tensor([[2000.0]], device=device)
     cases = ((3, 2000.0), (7, 2000.4), (9, 2010.0), (4, 1800.0))

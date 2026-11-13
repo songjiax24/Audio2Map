@@ -17,6 +17,7 @@ from audio2map.features.cond.vec import (
     build_cond_vec,
     canonical_bpm_norm_from_bpm,
     canonical_bpm_to_norm,
+    with_canonical_bpm,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "canonical_bpm_to_norm",
     "compute_chart_meta",
     "load_chart_meta_manifest",
+    "with_canonical_bpm",
 ]

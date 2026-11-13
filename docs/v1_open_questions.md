@@ -19,3 +19,4 @@
 | R11 | 倍速：official SR 用 `set_clock_rate`，MSD 用 `music_rate`，Rework 用 `speed_rate`（时间除以 rate）。不加 rate 维。推理 rate=1 | 已锁定，2026-10-25 | 6.6 |
 | R12 | Importance 是否替换六维 Pattern 的 Amount 时间份额 | 待办；当前否，cond 继续用方案 A 的 Amount | 6.6 |
 | R13 | 过渡期三处各有一份，统一时留下：物件行并入 `osu/v1/export.py`；RoPE 留下能处理小数位置的一份；`SAMPLE_RATE` 与 `HOP` 只留 `utils/time.py` | 待统一，现在不合并 | 11.3 |
+| R14 | 音频事件与 note 时间是否存在系统性偏差，以及补偿后能否改善相位注入；先测分布，再做训练对照，不默认启用 20ms 修正 | 待验证，2026-11-07 | 6.4；[测量方法](audio_alignment.md) |

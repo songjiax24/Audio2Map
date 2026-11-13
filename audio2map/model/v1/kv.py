@@ -26,10 +26,12 @@ class SelfKV:
     would overwrite a key this window still holds.
     """
 
-    def __init__(self, n_layers: int) -> None:
+    def __init__(self, n_layers: int, *, position_offset: int = 0) -> None:
         self.keys: list[torch.Tensor | None] = [None] * n_layers
         self.values: list[torch.Tensor | None] = [None] * n_layers
         self.length = 0
+        # Ring indexing is local; RoPE can retain positions from a cropped history.
+        self.position_offset = position_offset
 
     def write(self, layer: int, key: torch.Tensor, value: torch.Tensor) -> None:
         """Store the current token at ``length % DEC_SPAN``. ``(1, H, 1, D)``."""
@@ -95,7 +97,7 @@ def cached_logits(
     if cross is not None and (g is None or audio_mask is None):
         raise ValueError("a full cross cache needs g and audio_mask")
     x = model.token_emb(token)
-    pos = torch.tensor([position], device=x.device)
+    pos = torch.tensor([position + kv.position_offset], device=x.device)
     for index, layer in enumerate(model.decoder):
         hidden, alpha = layer.sa_mod(x, cond)
         attn = layer.self_attn
@@ -188,14 +190,14 @@ class WindowStep:
         if self.token is None or self.c_t is None or self.pos is None or self.slot is None:
             self.token = token.detach().clone()
             self.c_t = c_t.detach().clone()
-            self.pos = torch.tensor([position], device=token.device)
+            self.pos = torch.tensor([position + self.kv.position_offset], device=token.device)
             self.slot = torch.tensor([slot], device=token.device)
             self._iota = torch.arange(DEC_SPAN, device=token.device)
             self.order = torch.empty(DEC_SPAN, dtype=torch.long, device=token.device)
         else:
             self.token.copy_(token)
             self.c_t.copy_(c_t)
-            self.pos.fill_(position)
+            self.pos.fill_(position + self.kv.position_offset)
             self.slot.fill_(slot)
         assert self.order is not None and self._iota is not None
         self.order.copy_(self._iota)

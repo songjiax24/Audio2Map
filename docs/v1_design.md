@@ -1,10 +1,57 @@
 # Audio2Map v1 设计文档（唯一依据）
 
-- 版本：草稿 v0.22，2026-10-31 (UTC+8)
-- 适用对象：在仓库中实现 v1 的 Cursor
+- 版本：草稿 v0.29，2026-11-07 (UTC+8)
+- 适用对象：在仓库中实现、训练、生成或评测 v1 的开发者与编码代理
 - 来源：(1) 设计决策记录（10-07 至 10-21，后定的覆盖先定的）；(2) 10-07 至 10-17 的架构讨论记录；(3) 仓库 `exports/` 下的分析结果（只读核对）。
 
 ## 修订记录
+
+v0.29（2026-11-07）：
+
+1. 第 8.1 节：`history_start` 可将真实前缀中更早的 token 排除出解码历史。
+   更早的 token 只恢复游标与开放长条，不进入任何层 KV；保留片段从空缓存重放。
+   `SelfKV.position_offset` 将原绝对 RoPE 位置与局部环形缓存索引分开，CUDA 图同样使用
+   此偏移。默认零偏移保持已有生成行为。
+
+v0.28（2026-11-07）：
+
+1. 第 8.1 节：生成 API 可接收合法的 BOS 起始 token 前缀，逐 token 经过生产解码器
+   建立 KV 和游标，再自由续写。前缀重放不消耗采样 RNG；条件改变时重新建立缓存。
+   默认仍从 BOS 采样，既有评估协议不自动变成续写评估。
+
+v0.27（2026-11-06）：
+
+1. 修正 v0 `random_full`：只取 donor 的 17 维风格/难度值，`canonical_bpm_norm`
+   保留目标音乐的数值。teacher、生成与 demo 共用 `features/cond/vec.py` 的覆写实现。
+   v1 的红线/log BPM 路径不变；旧 baseline 的实际输入须凭历史记录核实，不回填旧结果。
+   新 v0 结果写入 `random_full_policy=donor_style_target_bpm_v1` 以区分协议。
+
+v0.26（2026-11-06）：
+
+1. 评估代码规范收整：token 前缀复用 `tokens/vocab.py`；秒到毫秒换算常量归属
+   `utils/time.py`，CLI 复用配置默认值和 motif 默认词表大小常量。协议与统计行为不变。
+2. 新增的模型解码一致性测试放在 `tests/model/v1/`，测试断言保持。
+
+v0.25（2026-11-06）：
+
+1. 第 9.2 节允许冻结自定义 probes 协议；六类 pattern 请求值从通过 gate 的 train
+   语料抽样校准，保留零值与正值分位点，不跨类别归一化。
+2. 音频补充 ±50/100/250/500 ms 的局部敏感性曲线；严格校验设置与产物后可复用
+   完整旧实验的相同 case，复制进新 journal 并记录来源，原实验不变。
+
+v0.24（2026-11-06）：
+
+1. 第 9.2 节扩展为能力测试组合：保留 F1 的参考复现能力证据，不生成谱面质量总分。
+   补充 lane-agnostic / 完整 hold、ROW 逐轨与事件召回、按谱分布与配对区间、
+   motif 误差贡献/覆盖/跨红线暴露、多样性的完整匹配与 motif 距离。
+2. 新增已生成产物的独立重评分、静态 SVG/HTML 报告、受控音频移位与单维条件请求。
+   既有五场景、采样协议、格点身份和冻结 motif 坐标保持；新增实验单独记录。
+
+v0.23（2026-11-06）：
+
+1. 第 9.2 节落地为独立的 `eval/v1/` 和 `audio2map-eval-v1`，训练与评测共用 teacher
+   统计。明确 v1 motif 的精确分数坐标与 train 词表身份，记录冻结输入、实际 mask、
+   逐谱结果和可校验的断点续评。模型结构与训练目标不变。
 
 v0.22（2026-10-31）：
 
@@ -512,7 +559,15 @@ k* = round((t_red − s_i) / L_i)
 
 - 采样函数 `generate_v1_chart` 收 22050 Hz 单声道 PCM、红线和 `ChartMeta`，返回取整后的音符、警告和 token【2026-10-29】。时长用样本数。缺字段用 mask。rate=1，不镜像，`cond_mask="none"`。音符与导出同一套：向下取整，同毫秒重复和尾不晚于头的 hold 都留下。
 - 命令行 `audio2map-infer-v1` 把文件变成这三个输入，再写一张新的 `.osu`。音频走 §1.1；时间线损坏时告诉用户音频损坏，不填静音。红线只从带 `[TimingPoints]` 的文件读取，不读物件。条件是调用方给出的 `ChartMeta` JSON，不从物件重算。标题、艺术家和 `AudioFilename` 只给写文件。写出的谱照抄这些红线，不写绿线。
-- 自回归采样，不喂金标。约束来自第 4、5 节的同一套 cursor。`teacher_decode` 只读金标前缀，不出谱。
+- 默认从 BOS 自回归采样，不喂金标。约束来自第 4、5 节的同一套 cursor。
+  `generate_v1_chart` / `sample_chart` 可显式接收合法的 BOS 起始 `prefix` 做续写：
+  强制 token 逐步经过同一个 decoder，保留绝对位置、游标和跨切点长条状态，之后才采样。
+  前缀必须在目标 BeatGrid 上合法；重放不消耗采样 RNG，返回值包含前缀及续写。
+  前缀 KV 始终在本次条件下重算，不跨条件复用。`teacher_decode` 仍只用于金标评分。
+  显式 `history_start` 是前缀中第一个进入解码器的 token 下标，默认 0。
+  之前的 token 只恢复游标与长条状态，并保留在返回的完整谱面中，不进入任何层 KV。
+  保留片段从空缓存重放；RoPE 用原绝对 token 位置，环形缓存长度从零开始计数，
+  音频游标与 BeatGrid 不变。能力测试需要记录实际可见片段和被跳过的 token 数。
 - 不走 v0 `audio2map-infer` 的 16 小节 overlap。入口是 `audio2map-infer-v1`。
 - 长音频按段做 encoder。整首 coverage 的 mel 只算一次，段从这份 mel 上切片。每层窗口是 `[e−512, e+512)`，8 层所以中心段两侧各留 4096 帧真实音频（halo）。段界裁到歌曲两端，和整段 encode 的边界相同。RoPE 用全局帧号。同一帧的 context 与整段一次 encode 一致（卷积长度不同时的浮点差见 6.1，不能要求逐位相等）。
 - 推理交叉注意力仍是已有的整段预投影 cache：连续窗切片，可见范围把窗打散才 gather。不是训练用的 Flex。
@@ -563,6 +618,13 @@ k* = round((t_red − s_i) / L_i)
 
 ### 9.2 v1 评测【已锁定，2026-10-29】
 
+实现入口是 `audio2map-eval-v1`（`cli/eval_v1.py`），模块在 `eval/v1/`。
+训练与评测的 teacher 统计共用 `train/v1/validation.py`。
+运行方式、冻结输入和输出字段见 [`v1_eval.md`](v1_eval.md)。
+Motif 复用已有 lane/hand/row 汇总与 Top-K 算法，位置用 BeatGrid 的拍索引与
+V80 分数精确表示：每拍 `lcm(V80_DENS)` 整数单位，不做 v0 tick 量化；残拍也推进
+一个拍索引。词表只从 train 拟合，记录 tokenizer 与坐标版本。诊断子集须明确标注。
+
 评测借鉴 v0 的条目划分，按 v1 的格点、整首采样和 18 维条件来算。不把结果投回 v0 的 1/48 tick，也不为了和 v0 baseline 并排而沿用 `CanonicalTiming`。正式出谱仍是 `generate_v1_chart`：22050 Hz 单声道 PCM、目标谱的红线、一份 `ChartMeta`。评测不另开采样入口。mask 由这份 meta 里哪些字段是 `None` 决定，`build_cond` 得到 `m_real`。rate=1，不镜像。split 用 `beatmapset_v1_drop2509435`，或当前配置的 `--split-manifest`，分区显式给出。
 
 Scenario 与生成模式分开。生成模式是约束采样、无约束采样、teacher forcing。Scenario 只决定送进模型的条件。一共五个：`matched_full`、`random_full`、`matched_partial`、`random_partial`、`none`。音频和红线始终来自目标谱。`random_*` 只把条件里的数换成 donor。没有 `random_none`。
@@ -587,6 +649,66 @@ full / partial / none 对齐第 6.6 节训练 mask 的三支，并且都先和�
 Teacher 是另一张表。整首金标前缀，走和训练一样的前向，不采样。报平均 NLL、token 准确率、困惑度，并按 `POS`、`ROW`、`BEAT`、`EOS` 分开。`legal_top1` 与 `legal_probability` 看还没屏蔽非法 token 的 logits。五个 scenario 都算，条件构造与上面相同。
 
 无约束合法率是另一次生成，不走 `generate_v1_chart`，采样时不把概率限制在合法 token 上。走到 `<EOS>` 且路径合法，记 `valid`；采到非法 token，记 `illegal_token`；网格走完仍没有合法的 `<EOS>`，记截断。这次不算对齐、条件误差、分布、motif、多样性和合理性。在 `matched_full`、`matched_partial`、`none` 上跑。v0 把无约束只绑在 `matched_full` 上，这里不沿用那条限制。
+
+#### 9.2.1 能力测试与 report version 2（2026-11-06）
+
+评估用于通过多组测试观察模型能力。相同音乐、相同条件仍允许不同合理编排；
+F1 更高是复现参考谱时机与编排能力的正向证据，不能单独判定谱面质量。
+不合成质量总分，也不依赖用户提供写谱评分标准。
+
+- 对齐同时报告 event / note 与 lane-aware / lane-agnostic。Event 使用原有端点身份；
+  note 的 hold 必须把同一轨的头尾配成完整身份后才匹配。去掉轨道后仍用多重集合，
+  不把同刻多轨事件去重。旧 `all/by_kind/by_lane` 字段保留，计算共用一份实现。
+- Teacher 补充 ROW 逐轨准确率和 tap/head/tail recall。复用现有通用 ROW 统计，
+  token 类型仍以 v1 的 POS/ROW/BEAT/EOS 为准。旧 teacher 记录缺失的明细保持缺失。
+- 区分 micro、样本均值和每谱均值；同谱多种子先在谱内平均，再统计跨谱 p10/p50/p90。
+  均值区间与 checkpoint 差异使用固定 seed 的按谱 bootstrap；种子配对不冒充独立谱面。
+  区间只描述当前谱面和固定生成样本，不证明总体质量优势。
+- 分布增加精确拍内位置、ROW 状态及 tap/hold 物件数；频率和每样本平均数的分母分列。
+  条件误差显示有效观测数与跨谱分布。空谱、组件测量失败和同轨冲突保留为可回看病例。
+- Motif 保留 `v1-grid-motifs-1` 坐标与原词表，新增可相加还原总 MAE 的长度贡献、
+  累积贡献、最大具体偏差、按长度的词表覆盖率和跨红线窗口数。跨红线数是当前坐标的
+  暴露诊断，不等于已经修正残拍距离，也不静默改变词表语义。
+- 多样性使用完整的四种匹配视角，并复用已有频率距离计算种子间 motif 距离。
+- matched_full/random_full 的固定种子配对响应进入正式输出，排除自抽、缺失与目标未变。
+  整组条件共同变化，斜率/方向不能分离单个字段的作用。
+
+`rescore` 读取一个完整 run，验证原始输入与生成文件哈希，在新目录重算而不重新采样；
+可选刷新 teacher。`compare` 要求两组冻结输入、条件与采样设置一致，逐谱配对统计差异。
+HTML 图由可选 `eval` 依赖生成，记录本次分析时间与原始生成时间的区别。
+
+受控实验为独立的 `probes` 协议，不混入上述五场景：
+
+1. 音频对齐：保持金标、红线、条件、长度不变，PCM 循环移位 0、±5 秒，
+   偏移上限为长度的 1/4，实际样本偏移写入记录。清除原 mel 缓存键，重算音频特征。
+   matched_full/none 下分别测 teacher；少量谱面在 matched_full 下自由生成。
+   测试对音频对齐的敏感性，循环边界也是扰动的一部分，不单独证明编排质量。
+2. 单维请求：仅保留官方 SR 或 LN 比例，其他 17 维 mask 掉。SR 请求 2/4/6，
+   LN 比例请求 0/0.5/1；每谱多种子、按谱平均，观察曲线、缺失、斜率及方向。
+   这是稀疏条件能力测试，单维 mask 比训练中典型 partial 更稀疏；不把其失败直接
+   解释为完整条件失效，也不把请求级别当作真实数据频率分布。
+
+默认 probes 在冻结池中确定性抽取 16 张 teacher、4 张生成，生成种子 0/1；
+小规模结果明确标注，输入与进度独立冻结并支持续跑。生产 sampler 与采样温度不变。
+
+自定义请求由 `eval/v1/protocol.py` 校验并冻结，保留上述默认协议的续跑兼容性。
+`tools/compute_v1_probe_protocol.py` 从已冻结且通过 gate 的 train motif 语料中确定性
+抽取至多 512 张，核对 split 归属与谱面哈希后，复用正式 meta 计算器测量 pattern。
+每类请求取 0、正值观测的 25% / 75% 分位点，去重；全零或无有效观测的类跳过，
+并报告有效数、零值数、正值数及分布。六类是各自区间并集的时间占比，可重叠，
+不要求和为 1。校准不使用 val/test 来选级别。
+
+正式评测和重评分验证 motif 词表的 raw 根目录、split 哈希和 train 语料成员。
+配对比较按模式核对实际精度与逐谱及种子记录。音频移位出谱保存实际输入 PCM，
+复用时校验音频、谱面和 token 文件的哈希。
+
+该细化协议在 0、±5 s 之外增加 ±50/100/250/500 ms。请求值与按采样率舍入、
+长度上限裁剪后的实际偏移均报告；小偏移单独画图，区间以谱面为重采样单位。
+自由生成同时保留逐谱物件数、token 数、空谱和组件错误数；空谱不从 F1 中排除，
+组件错误不填零。失败样例复用正式报告的判断与产物链接。token 数不代表时间覆盖长度。
+可从完整旧 probes 复用相同 case：核对源 run、检查点、温度、精度、PyTorch/GPU、
+偏移规则、逐条条件与 mask，以及生成文件校验和。复用结果复制进目标 journal，
+记录源目录及哈希，目标仍是完整实验记录；耗时不包含旧结果最初的计算成本。
 
 ---
 
@@ -613,7 +735,8 @@ Teacher 是另一张表。整首金标前缀，走和训练一样的前向，不
   `cli → eval → train → generate → dataset → model → features → metrics → tokens → grid → osu → utils`。
 - **v1 已有的部分**：红线、BeatGrid（含 `phase_at`）、V80 打标签、v1 tokenizer、ffmpeg+soxr 解码与 log-mel、`model/audio_stem.py`（`AudioEncoder` 的前两层，端到端训练）、`features/cond/v1`（18 维条件与 ReworkSR）、`model/v1`（8/8）、`dataset/v1`（整首谱 → 带 mel 的 `V1Batch`）。训练入口是 `audio2map-train-v1` / `train/v1/`，跑整曲 teacher forcing（方案 A），与 v0 `audio2map-train` 分开。正式出谱是 `audio2map-infer-v1`：约束采样、分段 encoder、预投影 KV。`teacher_decode` 只读金标。v0 `audio2map-infer` 仍是 16 小节拼接。训练侧的 C/D 退路还没有。`eval/v1_backend.py` 仍是 v0 评测适配器壳子，不是 v1 tokenizer。
 - 核对第 9 节用过的一次性计数脚本已从工作树去掉（原先的 `scripts/analysis/` 与 `scripts/v80_formal_label_counts.py`）。基准数字仍以第 9 节和 `exports/floor_d64/` 为准。`exports/` 在 `.gitignore`（提交 `767ae06`）。这些脚本不是 v1 代码。
-- `docs/` 只有 `ARCHITECTURE.md`、`chart_tokens.md`（v0 token 说明）、`data_collection.md`。本文件建议放在 `docs/v1_design.md`。
+- 设计主文件是 `docs/v1_design.md`；模块归属见 `docs/ARCHITECTURE.md`，评测协议与命令
+  见 `docs/v1_eval.md`。`docs/chart_tokens.md` 保留 v0 token 说明。
 
 ### 11.2 可复用
 
@@ -637,6 +760,7 @@ v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`Can
 | `audio2map/utils/errors.py` | `ChartRejected` 与一一对应的拒绝原因 |
 | `audio2map/osu/v1/timing.py` | float64 红线（`Redline`，不是 v0 `TimingPoint`）；`offset` 与 `beatLength` 必填，缺 `meter` 用 4 |
 | `audio2map/utils/tolerance.py` | `EPS`、`TIE` 只定义这一处 |
+| `audio2map/utils/time.py` | 共享帧步长 `DT_MS` 与秒到毫秒换算常量 `MS_PER_SECOND` |
 | `audio2map/grid/v1/beatgrid.py` | BeatGrid（第 2 节）。拍范围是 `coverage_start_ms` / `coverage_end_ms`。`phase_at(t)` 给出 φ 和全局拍序号 |
 | `audio2map/grid/v1/positions.py` | `V80_DENS` 与 80 个格子 |
 | `audio2map/tokens/errors.py` | `IllegalTokenError` |
@@ -663,6 +787,17 @@ v1 不沿用其逻辑（可以直接改写或替换）：`grid/timing.py`（`Can
 | `audio2map/osu/v1/export.py` | 从零 mania 外壳 `fresh_mania_lines`，v0 从零路径也调用它。只写红线，不丢 hit object。警告留给调用方 |
 | `audio2map/cli/train_v1.py` | `audio2map-train-v1`。配置是 `configs/train/train_v1.yaml`，不是 `train_multi.yaml` |
 | `audio2map/cli/infer_v1.py` | `audio2map-infer-v1`。不是 `audio2map-infer` |
+| `audio2map/eval/v1/` | 整首 v1 评测：五种条件场景、teacher、约束采样、无约束合法率、格点与 motif 指标 |
+| `audio2map/eval/v1/summary.py` | 正式评测与重评分共用的参考谱、motif、多样性和指标汇总 |
+| `audio2map/eval/v1/rescore.py` | 验证历史产物，在独立目录重评分与可选刷新 teacher |
+| `audio2map/eval/v1/probes.py` | 独立的音频对齐与单维条件请求实验，复用正式 generator |
+| `audio2map/eval/v1/protocol.py` | probes 请求校验、train-only pattern 级别校准与来源冻结 |
+| `audio2map/eval/v1/statistics.py` | 按谱统计、bootstrap、配对差异和条件响应 |
+| `audio2map/eval/v1/comparison.py` | 冻结输入一致的 checkpoint 对比 |
+| `audio2map/eval/v1/archive.py` | 校验完整逐谱记录和冻结条件，提供各模式的音频来源供 checkpoint 对比 |
+| `audio2map/eval/v1/reporting/` | 从汇总和逐谱记录渲染 Markdown、HTML 与 SVG；指标和汇总模块不依赖渲染 |
+| `audio2map/cli/eval_v1.py` | `audio2map-eval-v1`。分区显式给出，输出冻结 donor、mask、配置和逐谱结果 |
+| `audio2map/train/v1/validation.py` | 训练和评测共用的 teacher 统计与设备搬运 |
 | `tests/` 下与包同构的 `v1/` | 单元测试 |
 
 整首 V1Batch、v1 训练入口和正式出谱已接上。训练仍是方案 A。R1 的 C/D 退路还没写。

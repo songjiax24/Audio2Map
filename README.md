@@ -1,253 +1,163 @@
 # Audio2Map
 
-Conditional generative model for **osu!mania 4K** charts:
+Audio2Map generates **osu!mania 4K** charts from audio, beat timing, and
+difficulty and pattern conditions. Several charts can interpret the same song
+and conditions. Evaluation uses reference matching, condition response,
+diversity, and structural checks to measure different model capabilities.
 
-```text
-P(chart | audio, BPM, offset, condition_vector)
-```
+| Version | Training and generation | Commands |
+|---------|-------------------------|----------|
+| v1 | Whole-chart training, frame-level audio with beat phase, red-line timing, and 18 masked condition fields | `audio2map-train-v1`, `audio2map-infer-v1`, `audio2map-eval-v1` |
+| v0 | Constant BPM, meter 4, 16-bar training windows, and overlapping generation | `audio2map-train`, `audio2map-infer`, `audio2map-eval` |
 
-Phase 1 **training** filter: **constant BPM**, **meter = 4**.  
-Collector stores **all mania 4K** from Sayobot ranked/approved sets (variable BPM included); eligibility is applied later (`audio2map-meta --eligible-only`, training).  
-This is a **generative** task (many valid charts per audio); training metrics like token accuracy are diagnostics only, not the final quality target.
+The two versions use different audio features, token vocabularies, and
+checkpoints. The [web demo](demo/README.md) uses v0.
 
-> **Source of truth:** the Python package under `audio2map/` and the `audio2map-*` CLI entry points (`pyproject.toml [project.scripts]`).  
-> Conflict: **code > this README > `docs/`**.
+## Setup
 
----
-
-## Documentation map
-
-| Document | Role |
-|----------|------|
-| **[README.md](README.md)** (this file) | Install, CLI, current model numbers |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layering, dual parsers, sample builder, paths |
-| [docs/chart_tokens.md](docs/chart_tokens.md) | Token cheat sheet (vocab, loss mask) |
-| [docs/data_collection.md](docs/data_collection.md) | Sayobot collector (only if collecting) |
-| [configs/README.md](configs/README.md) | YAML `--config` files |
-| [demo/README.md](demo/README.md) | Web demo |
-
----
-
-## Repository layout
-
-```text
-audio2map/                    # Python package (dependency direction is one-way, low → high)
-├── utils/                    # paths.py (AUDIO2MAP_DATA_ROOT)
-├── osu/                      # authoritative .osu parser, schema, export (ms, not quantized)
-├── grid/                     # CanonicalTiming, tick/bar geometry, TickNote
-├── tokens/                   # ROW vocab, encode, decode
-├── features/                 # tick audio grid + cond_vec (meta / SR · MinaCalc · patterns)
-├── dataset/                  # torch-free: filter, windows, bundle, sample (build_sample)
-├── model/                    # AudioChartModel (enc_dec), rotary, config (MAX_DECODER_LEN …)
-├── train/                    # data.py, step.py (masked CE), loop.py
-├── generate/                 # decode, overlap inference, service (single end-to-end pipeline)
-├── eval/                     # teacher / generate / note-match metrics
-└── cli/                      # argparse: meta/grid/train/eval/infer (--config YAML)
-
-scripts/                      # pipeline (not core library): collect, overfit, batch_pack, formal pipeline
-tools/                        # diagnostics: analyze_*
-demo/                         # Web demo source (backend + frontend)
-tests/                        # pytest, mirrors package layout (tests/osu, features, dataset, …)
-docs/                         # architecture, tokens, collector
-configs/                      # YAML configs — actually loaded via --config
-```
-
-**Code vs data:** git holds **code only** (`audio2map/`, `scripts/`, `tools/`, `demo/` source, `tests/`, `docs/`, `configs/`, `uv.lock`).
-
-| On disk (gitignored) | Role |
-|----------------------|------|
-| `checkpoint/` | Optional local demo fallback (`step_200000.pt`); demo prefers `$AUDIO2MAP_DATA_ROOT/processed/checkpoints/formal_enc_dec_v3/` |
-| `chart_meta/` | Optional local `manifest.jsonl` for demo — or `AUDIO2MAP_CHART_META_MANIFEST` / `$AUDIO2MAP_DATA_ROOT/chart_meta/` |
-| `$AUDIO2MAP_DATA_ROOT/` | Raw sets, audio grids, formal checkpoints (see below) |
-
-Do not commit weights, manifests, `node_modules/`, or `demo/.tools/`.
-
----
-
-## Data disk layout
-
-Set `AUDIO2MAP_DATA_ROOT` to the data disk. If unset, the library warns and uses
-repo-local `.local-data/` (gitignored).
-
-```text
-$AUDIO2MAP_DATA_ROOT/
-├── raw/                      # {set_id}/*.osu + referenced audio
-├── processed/                # audio_grid, checkpoints, generated, logs
-│   ├── audio_grid/           # {stem}.npy + .json  (tick log-mel, spec v3)
-│   ├── checkpoints/          # formal_enc_dec_v3/ (current), older trial dirs
-│   ├── logs/
-│   └── generated/
-├── chart_meta/               # manifest.jsonl (SR, MSD, pattern stats)
-├── splits/                   # beatmapset_v1.json (split scheme, not a model version)
-└── .collector/
-```
-
----
-
-## Setup (uv)
+Use Python 3.12, [uv](https://docs.astral.sh/uv/), and FFmpeg with `ffprobe` on
+`PATH`. On Debian/Ubuntu, install `ffmpeg` and `libsndfile1`. The v1 training
+corpus was prepared with FFmpeg 7.1.1. See the
+[v1 audio specification](docs/v1_design.md) for decoder and resampler details.
 
 ```bash
-apt-get update && apt-get install -y ffmpeg libsndfile1
-
-curl -LsSf https://astral.sh/uv/install.sh | sh
-cd /path/to/Audio2Map
-uv venv --python 3.12 .venv && source .venv/bin/activate
-uv pip install -e ".[dev,train,demo]"
-# PyTorch CUDA wheel (optional): https://pytorch.org/get-started/locally/
-# Example: uv pip install torch --index-url https://download.pytorch.org/whl/cu128
-
-export AUDIO2MAP_DATA_ROOT=/path/to/audio2map_data   # required for real data
-pytest tests/osu tests/features -q
+uv sync --python 3.12 --extra train --extra eval --extra dev
+source .venv/bin/activate
+export AUDIO2MAP_DATA_ROOT=/path/to/audio2map_data
 ```
 
-Copy [.env.example](.env.example) to `.env` for local paths and collector contact
-(`AUDIO2MAP_CONTACT`). Do not commit `.env`.
-
-**Web demo** (local checkpoint + chart_meta): see [demo/README.md](demo/README.md).
+The `train` extra provides PyTorch for training, inference, and model evaluation.
+The `eval` extra adds Matplotlib for HTML figures. The `dev` extra provides tests
+and linting. For CUDA runs, verify that PyTorch sees the GPU:
 
 ```bash
-# backend
-uv run --extra train --extra demo uvicorn demo.backend.app:app --host 0.0.0.0 --port 8000
-# frontend
-cd demo/frontend && npm install && npm run dev
+python -c 'import torch; print(torch.cuda.is_available())'
 ```
 
----
+The data root defaults to the ignored `.local-data/` directory. Keep raw charts
+with their referenced audio under `raw/<set_id>/`. Split manifests go under
+`splits/`, and checkpoints, caches, and evaluation runs go under `processed/`.
+Keep weights, chart/audio assets, local manifests, and `exports/` out of Git.
 
-## CLI reference
+## v1 workflow
 
-Installed via `pyproject.toml [project.scripts]` (or `python -m audio2map.cli.<name>`).
-All entries accept `--config <yaml>` for defaults; CLI flags override the file.
+### Train
 
-| Command | Purpose |
-|---------|---------|
-| `audio2map-grid precompute` | Build `processed/audio_grid/` caches (spec v3, 128-d) |
-| `audio2map-grid audit` | Validate caches; `--fix` removes corrupt files |
-| `audio2map-meta` | Build `chart_meta/manifest.jsonl` |
-| `audio2map-train` | Formal multi-chart training (`AudioChartModel`) |
-| `audio2map-eval` | Teacher / infer metrics |
-| `audio2map-infer` | Full-chart AR generate → export `.osu` |
-
-Pipeline scripts (not installed entry points): `python -m scripts.collect.cli`,
-`scripts/run_formal_pipeline.sh`, `scripts/train_debug_overfit.py`,
-`scripts/batch_pack_osz.py`, `scripts/v0_baseline_report.py`.
-
-Diagnostic tools live in `tools/` (run as plain scripts): `analyze_dataset.py`,
-`analyze_timing.py`, `analyze_row_token_stats.py`, `analyze_tick_quantization.py`,
-`analyze_window_token_len.py`.
-
----
-
-## Typical workflow
-
-### 1. Collect (optional if raw/ already populated)
+Put the existing `beatmapset_v1_drop2509435.json` manifest under `splits/`, or
+supply your own compatible manifest with `--split-manifest`. The trainer builds
+v1 caches from raw charts and audio. The default config uses CUDA and bf16 and
+saves `step_N.pt` files under `processed/checkpoints/v1_chart/`.
 
 ```bash
-python -m scripts.collect.cli --target 1000
-python -m scripts.collect.cli --status
+audio2map-train-v1 --config configs/train/train_v1.yaml
 ```
 
-### 2. Precompute audio grids
+Pass `--resume /path/to/step_N.pt` to continue a run. `--max-steps` is the total
+step count.
+
+### Generate a chart
+
+Provide the audio file, a timing file with a `[TimingPoints]` section, and a
+ChartMeta JSON object. Inference reads red lines from the timing file. Save
+`{"cond_vec_version": 3, "official_sr": 5.0}` as `condition.json` for a
+minimal request. Omitted condition fields are masked. The condition fields
+and their units are documented in the [v1 design](docs/v1_design.md).
+
+```bash
+checkpoint="$AUDIO2MAP_DATA_ROOT/processed/checkpoints/v1_chart/step_200000.pt"
+audio2map-infer-v1 --checkpoint "$checkpoint" \
+  --audio path/to/song.mp3 --timing path/to/timing.osu \
+  --cond condition.json --out path/to/generated.osu
+```
+
+Replace the step number with an available checkpoint. The generated chart
+references the audio by filename. For an `.osz` package, zip the chart and its
+referenced audio together and give the archive the `.osz` extension.
+
+### Evaluate a checkpoint
+
+Start with a small validation subset using teacher forcing. It needs no fitted
+motif vocabulary.
+
+```bash
+audio2map-eval-v1 --mode teacher --split val --limit 4 \
+  --checkpoint "$checkpoint" \
+  --out "$AUDIO2MAP_DATA_ROOT/processed/eval/v1/teacher_smoke"
+```
+
+For constrained generation metrics, fit the motif vocabulary on the training
+split first. This example uses one seed and a small validation pool:
+
+```bash
+eval_root="$AUDIO2MAP_DATA_ROOT/processed/eval/v1"
+audio2map-eval-v1 --mode fit-motifs --split train --out "$eval_root/motif_train"
+audio2map-eval-v1 --config configs/eval/v1.yaml --mode constrained \
+  --split val --limit 4 --seeds 0 --checkpoint "$checkpoint" \
+  --motif-vocab "$eval_root/motif_train/motifs.json" \
+  --out "$eval_root/constrained_smoke" --html
+```
+
+`records.jsonl` holds the per-chart results and `summary.json` holds aggregate
+metrics. `summary.md` shows the main tables. With `--html`, open `index.html`
+for figures and tables. Use a separate output directory for each checkpoint
+and configuration. See the [evaluation guide](docs/v1_eval.md) for a full run,
+checkpoint comparisons, rescoring, and audio-shift and condition probes.
+
+## v0 workflow
+
+v0 uses cached tick-level audio grids and
+`splits/beatmapset_v1.json`. For a new v0 data disk, add `--init-split` to the
+first training command. If raw charts are missing, see the
+[data collector guide](docs/data_collection.md) for the Sayobot collection
+pipeline.
 
 ```bash
 audio2map-grid audit
-audio2map-grid precompute   # skips valid; for new raw sets
-```
-
-### 3. Train (formal)
-
-```bash
+audio2map-grid precompute
 audio2map-train --config configs/train/train_multi.yaml
-# first run on a new data disk: add --init-split to write splits/beatmapset_v1.json
-# defaults: 200k steps, batch 16, d_model=512, enc=4/dec=6/heads=8,
-#           samples_per_chart=4, bf16 → processed/checkpoints/formal_enc_dec_v3/
 ```
 
-Or explicit:
+The v0 training config writes to `processed/checkpoints/formal_enc_dec_v3/`.
+To run teacher evaluation and generate with that checkpoint:
 
 ```bash
-audio2map-train \
-  --max-steps 200000 \
-  --batch-size 16 \
-  --samples-per-chart 4 \
-  --d-model 512 \
-  --out "$AUDIO2MAP_DATA_ROOT/processed/checkpoints/formal_enc_dec_v3"
+checkpoint="$AUDIO2MAP_DATA_ROOT/processed/checkpoints/formal_enc_dec_v3/step_200000.pt"
+audio2map-eval --mode teacher --checkpoint "$checkpoint" --split test \
+  --split-manifest "$AUDIO2MAP_DATA_ROOT/splits/beatmapset_v1.json"
+audio2map-infer --checkpoint "$checkpoint" \
+  --osu path/to/template.osu --out path/to/generated.osu
 ```
 
-- Grid required by default (`--allow-missing-grid` to opt out)
-- Architecture is **enc_dec only** (no `--architecture` / bar-pooling flags)
-- No `--resume`: each run starts at step 0
-- Train/val/test come from `splits/beatmapset_v1.json` (create once with `--init-split`; never overwrite — use `beatmapset_v2.json` for a new split)
+`audio2map-meta` builds the legacy `chart_meta/manifest.jsonl` used by the demo.
+See the [v0 token reference](docs/chart_tokens.md) for the 821-token vocabulary
+and window representation.
 
-### 4. Evaluate / generate
+## Repository guide
 
-```bash
-audio2map-eval --mode teacher \
-  --checkpoint .../step_200000.pt \
-  --split-manifest "$AUDIO2MAP_DATA_ROOT/splits/beatmapset_v1.json" \
-  --split test
+| Path | Contents |
+|------|----------|
+| `audio2map/` | Parsing, grids, tokens, features, models, training, generation, evaluation, and CLI entry points |
+| `configs/` | [YAML configuration and overrides](configs/README.md) |
+| `tools/` and `scripts/` | Diagnostics and data pipelines |
+| `tests/` | Tests that mirror the package |
+| `demo/` | [v0 web demo](demo/README.md) |
 
-# debug one chart (does not sample the frozen test split):
-audio2map-eval --mode teacher \
-  --checkpoint .../step_200000.pt \
-  --osu "path/to/chart.osu" --start-bar 8
-
-audio2map-infer \
-  --checkpoint .../step_200000.pt \
-  --osu "path/to/template.osu" \
-  --out "path/to/output.osu"
-# overlap: 16 bars = 8 context + 4 keep + 4 future (fixed, same as training)
-```
-
-Pack `.osz`: zip the generated `.osu` + its `AudioFilename` audio from the same set folder, or use the web demo.
-
----
-
-## Model summary (current code)
-
-| Item | Value |
-|------|-------|
-| Class | `AudioChartModel` (`architecture="enc_dec"`) |
-| Formal size | `d_model=512`, enc=4, dec=6, heads=8 (`audio2map-train` defaults) |
-| Vocab | **821** (4 special + 192 POS + 625 ROW) |
-| Training window | **16 bars** = **3072** ticks (`WINDOW_BARS`) |
-| Inference overlap | **8 context + 4 keep + 4 future** = 16 |
-| Max decoder len | **2048** |
-| Audio | **128-d** log-mel / tick @ 22.05 kHz; STFT `n_fft=1024`, `hop=128`; **spec v3**; linear interp onto tick starts |
-| Condition | **18-d** `cond_vec` (dims 0–16 style/difficulty, dim 17 `canonical_bpm_norm`) — not tokenized |
-| Versions | `TOKENIZER_VERSION=1`, `COND_VEC_VERSION=1`, audio **spec v3** (`AUDIO_FEATURE_SPEC_VERSION`) |
-| Encoder pos | RoPE + learned `pos_in_bar` |
-| Cond injection | MLP → broadcast-add on all encoder/decoder tokens |
-| Loss | Masked cross-entropy (teacher forcing) |
-
-`cond_vec` names (fixed order): `COND_VEC_NAMES` in `audio2map/features/cond/vec.py`. Matching / demo sliders use ChartMeta originals (`USER_COND_SOURCE_FIELDS`: `official_sr`, analyzer ratios, `msd_*`). `build_cond_vec` maps those to the vector (`official_sr/10` and `msd_*/40`, clip 1.5). `offset_ms` is **not** in `cond_vec`. Do not reorder `COND_VEC_NAMES` without bumping `COND_VEC_VERSION`.
-
----
+[Architecture](docs/ARCHITECTURE.md) describes package boundaries and ownership.
+The [v1 design](docs/v1_design.md) records the model and data contracts.
+For diagnostic methods and artifacts, see
+[audio alignment](docs/audio_alignment.md), [onset probes](docs/onset_probe.md),
+and [generation logits](docs/generation_logits.md).
 
 ## Tests
 
 ```bash
-pytest tests/ -q
+pytest
+lint-imports
 ```
 
-Without `AUDIO2MAP_DATA_ROOT` / raw charts, data-backed tests **skip** automatically.  
-Optional marker for CI-only filtering: `-m "not requires_data"` (same outcome when data is absent).
-
-Tests mirror the package layout: `tests/osu/`, `tests/tokens/`, `tests/features/`,
-`tests/dataset/`, `tests/model/`, `tests/train/`, `tests/generate/`, `tests/eval/`,
-`tests/cli/`, `tests/collect/`, `tests/demo/`, plus `test_paths.py`.
-Import layering is enforced by import-linter (`uv run lint-imports`, see `pyproject.toml`).
-
----
-
-## What was removed
-
-- **v1** 10 ms mel + sparse-event pipeline (no longer in this repo)
-- **`PrefixLMAudioChartModel`**, bar-level audio pooling, variable `window_bars_choices` as the formal path
-- Older checkpoint dirs such as `train_v1/` / `trial_multi_v2/` are obsolete if still present on the data disk
-
----
+Data-backed tests skip when the required charts or frozen artifacts are absent.
 
 ## License
 
-Code: project authors. Beatmap assets: respective creators / osu! rights holders.
+Code by the project authors. Beatmap assets belong to their respective creators
+and rights holders.

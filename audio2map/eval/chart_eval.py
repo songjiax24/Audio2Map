@@ -21,7 +21,7 @@ from audio2map.dataset.donor import (
     donor_pool_report,
     require_donor_map,
 )
-from audio2map.eval.frozen_inputs import DIVERSITY_GENERATION_SEEDS
+from audio2map.eval.frozen_inputs import DIVERSITY_GENERATION_SEEDS, V0_RANDOM_FULL_POLICY
 from audio2map.dataset.sample import TrainingSample, build_sample
 from audio2map.eval.cache import cache_get_or_put, generation_cache_key
 from audio2map.eval.chart_stats import ChartStatAccumulator
@@ -34,6 +34,7 @@ from audio2map.eval.result import GeneratedChart
 from audio2map.eval.score import score_chart
 from audio2map.eval.v0_backend import BACKEND_ID, generate_v0
 from audio2map.features.cond import ChartMeta, CondVecError, build_cond_vec, compute_chart_meta
+from audio2map.features.cond import CANONICAL_BPM_NORM_INDEX, with_canonical_bpm
 from audio2map.generate.overlap import DecodeConfig, GenerationRangeConfig, OverlapConfig, generate_chart_notes
 from audio2map.generate.service import resolve_audio_file
 from audio2map.grid import CanonicalTiming
@@ -107,6 +108,7 @@ class TeacherEvalResult:
             "charts": self.charts,
             "donor_map": self.donor_map,
             "donor_pool": self.donor_pool,
+            "random_full_policy": V0_RANDOM_FULL_POLICY,
         }
 
 
@@ -249,8 +251,8 @@ def eval_teacher_forcing(
 ) -> TeacherEvalResult:
     """Token accuracy with GT prefix. Windows are built once per chart.
 
-    ``random_full`` replaces only the condition vector, using the persistent
-    target → donor path map. The window RNG is separate from the donor RNG.
+    ``random_full`` replaces style values using the persistent target → donor
+    map, retaining the target audio's BPM. Window and donor RNGs are separate.
     """
     unknown = [name for name in scenarios if name not in ("matched_full", "random_full")]
     if unknown:
@@ -313,7 +315,10 @@ def eval_teacher_forcing(
                 cond_vec = chart.sample.cond_vec
                 if scenario == "random_full":
                     assert donor is not None
-                    cond_vec = by_rel[donor.pairs[chart.relpath]].sample.cond_vec
+                    cond_vec = with_canonical_bpm(
+                        by_rel[donor.pairs[chart.relpath]].sample.cond_vec,
+                        chart.sample.cond_vec[CANONICAL_BPM_NORM_INDEX],
+                    )
                 _score_teacher_sample(
                     model,
                     chart.sample,
@@ -530,6 +535,7 @@ def eval_generation(
     finally:
         if owned_tmp is not None:
             owned_tmp.cleanup()
+    out["random_full_policy"] = V0_RANDOM_FULL_POLICY
     if donor is not None:
         out["donor_pool"] = donor_pool_report(donor, list(by_rel))
         logger.info(
@@ -551,7 +557,9 @@ def _condition_for(path: Path, meta: ChartMeta, cond: np.ndarray, scenario: str,
         rel = chart_key(path, root)
         donor_rel = donor.pairs[rel]
         adherence_meta = by_rel[donor_rel][1]
-        used = by_rel[donor_rel][2]
+        used = with_canonical_bpm(
+            by_rel[donor_rel][2], cond[CANONICAL_BPM_NORM_INDEX],
+        )
     return used, donor_rel, adherence_meta
 
 

@@ -45,9 +45,9 @@ class ChartAudio:
     audio_key: str | None = None
 
 
-def load_chart_audio(path: Path | str) -> ChartAudio:
-    """Decode one chart, or read the rate-1 PCM cache when the file size matches."""
-    notes, redlines, pcm, t_audio, audio_key = _load_chart(path)
+def load_chart_audio(path: Path | str, *, use_cache: bool = True) -> ChartAudio:
+    """Load one chart. Frozen evaluations can require a decode of the source bytes."""
+    notes, redlines, pcm, t_audio, audio_key = _load_chart(path, use_cache=use_cache)
     return ChartAudio(
         notes=tuple(notes),
         redlines=redlines,
@@ -163,6 +163,8 @@ def _resolve_meta(source: Path | str | ChartAudio, meta: ChartMeta | dict | None
 
 def _load_chart(
     source: Path | str | ChartAudio,
+    *,
+    use_cache: bool = True,
 ) -> tuple[list[ManiaNote], tuple[Redline, ...], np.ndarray, float, str | None]:
     if isinstance(source, ChartAudio):
         pcm = np.asarray(source.pcm, dtype=np.float32)
@@ -176,7 +178,7 @@ def _load_chart(
         raise ValueError(f"not a 4K mania chart: {path}")
     beatmap = parse_beatmap(path)
     redlines = parse_redlines_file(path).redlines
-    audio_key, cached_pcm, cached_t = _cached_pcm(path)
+    audio_key, cached_pcm, cached_t = _cached_pcm(path) if use_cache else (None, None, None)
     if cached_pcm is None:
         decoded = decode_audio(chart_audio_path(path))
         return list(beatmap.notes), redlines, decoded.y, decoded.t_audio_ms, audio_key

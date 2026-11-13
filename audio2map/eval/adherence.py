@@ -26,8 +26,10 @@ def condition_mae(
     names: tuple[str, ...] = USER_COND_SOURCE_FIELDS,
 ) -> dict[str, float | None]:
     """Per-name absolute error. A missing side stays missing. No composite score."""
-    target_values = source_values(target) if isinstance(target, ChartMeta) else target
-    generated_values = source_values(generated) if isinstance(generated, ChartMeta) else generated
+    target_values = source_values(target, names) if isinstance(target, ChartMeta) else target
+    generated_values = (
+        source_values(generated, names) if isinstance(generated, ChartMeta) else generated
+    )
     out: dict[str, float | None] = {}
     for name in names:
         left = target_values.get(name)

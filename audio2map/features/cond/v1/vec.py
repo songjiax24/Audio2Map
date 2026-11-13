@@ -60,6 +60,9 @@ _SOURCE: tuple[tuple[str, str], ...] = (
     ("pattern_wildcard", "ratio"),
 )
 
+# Original ChartMeta units, aligned with values and mask dimensions.
+COND_SOURCE_FIELDS = tuple(name for name, _kind in _SOURCE)
+
 
 @dataclass(frozen=True, slots=True)
 class CondVector:

@@ -18,8 +18,9 @@ from audio2map.features.audio.v1.constants import SAMPLE_RATE
 from audio2map.features.cond.chart import ChartMeta
 from audio2map.features.cond.v1.vec import build_cond
 from audio2map.generate.v1.notes import V1Note, notes_from_events
-from audio2map.generate.v1.sample import sample_chart
+from audio2map.generate.v1.sample import SampleResult, sample_chart, sample_unconstrained
 from audio2map.generate.v1.stream import KEEP_FRAMES, encode_context
+from audio2map.generate.v1.trace import StepObserver
 from audio2map.grid.v1.beatgrid import build_beatgrid
 from audio2map.model.v1.model import V1ChartModel
 from audio2map.model.v1.weights import load_v1_state_dict
@@ -69,29 +70,28 @@ def generate_v1_chart(
     seed: int = 0,
     temperature: float = 1.0,
     keep_frames: int = KEEP_FRAMES,
+    prefix: Sequence[str] | None = None,
+    history_start: int = 0,
+    observer: StepObserver | None = None,
 ) -> V1Chart:
     """Sample one chart at rate 1. Condition dropout stays off.
 
     ``pcm`` is mono audio already at 22050 Hz. Duration is its sample count.
     ``redlines`` are the timing input. ``meta`` is the condition; missing
-    fields stay masked.
+    fields stay masked. An optional legal BOS-led ``prefix`` is replayed
+    under this condition before continuation; returned notes include it.
+    ``history_start`` removes earlier prefix tokens from model history while
+    preserving cursor state and absolute token/audio positions.
     """
     model.eval()
-    audio, t_audio = _pcm(pcm)
-    grid = build_beatgrid(redlines, t_audio)
-    context, g, segments = encode_context(
+    grid, context, g, segments = _context(
         model,
-        audio,
-        grid,
+        pcm,
         redlines,
         device=device,
         keep_frames=keep_frames,
     )
-    cond_vec = build_cond(meta)
-    values = torch.from_numpy(cond_vec.values).unsqueeze(0).to(device)
-    mask = torch.from_numpy(cond_vec.m_real).unsqueeze(0).to(device)
-    with torch.inference_mode():
-        cond = model.cond(values, mask)
+    cond = _condition(model, meta, device)
     tokens = sample_chart(
         model,
         context,
@@ -100,6 +100,9 @@ def generate_v1_chart(
         cond=cond,
         seed=seed,
         temperature=temperature,
+        prefix=prefix,
+        history_start=history_start,
+        observer=observer,
     )
     events = decode_tokens(tokens, grid)
     notes, warnings = notes_from_events(events)
@@ -112,3 +115,57 @@ def _pcm(pcm: np.ndarray) -> tuple[np.ndarray, float]:
         raise ValueError("PCM audio must be a non-empty 1-d buffer at 22050 Hz")
     duration = float(audio.shape[0]) / float(SAMPLE_RATE) * 1000.0
     return np.ascontiguousarray(audio), duration
+
+
+def generate_v1_unconstrained(
+    model: V1ChartModel,
+    pcm: np.ndarray,
+    redlines: Sequence[Redline],
+    meta: ChartMeta,
+    *,
+    device: torch.device,
+    seed: int = 0,
+    temperature: float = 1.0,
+    keep_frames: int = KEEP_FRAMES,
+) -> SampleResult:
+    """Unmasked validity diagnostic. Its output does not enter chart metrics."""
+    model.eval()
+    grid, context, g, _segments = _context(
+        model,
+        pcm,
+        redlines,
+        device=device,
+        keep_frames=keep_frames,
+    )
+    cond = _condition(model, meta, device)
+    return sample_unconstrained(
+        model,
+        context,
+        g,
+        grid,
+        cond=cond,
+        seed=seed,
+        temperature=temperature,
+    )
+
+
+def _context(model, pcm, redlines, *, device, keep_frames):
+    audio, duration = _pcm(pcm)
+    grid = build_beatgrid(redlines, duration)
+    context, g, segments = encode_context(
+        model,
+        audio,
+        grid,
+        redlines,
+        device=device,
+        keep_frames=keep_frames,
+    )
+    return grid, context, g, segments
+
+
+def _condition(model, meta, device):
+    vector = build_cond(meta)
+    values = torch.from_numpy(vector.values).unsqueeze(0).to(device)
+    mask = torch.from_numpy(vector.m_real).unsqueeze(0).to(device)
+    with torch.inference_mode():
+        return model.cond(values, mask)

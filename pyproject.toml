@@ -28,6 +28,9 @@ dev = [
 train = [
     "torch>=2.1",
 ]
+eval = [
+    "matplotlib>=3.9",
+]
 demo = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
@@ -41,6 +44,7 @@ audio2map-grid = "audio2map.cli.grid:main"
 audio2map-train = "audio2map.cli.train:main"
 audio2map-train-v1 = "audio2map.cli.train_v1:main"
 audio2map-eval = "audio2map.cli.eval:main"
+audio2map-eval-v1 = "audio2map.cli.eval_v1:main"
 audio2map-infer = "audio2map.cli.infer:main"
 audio2map-infer-v1 = "audio2map.cli.infer_v1:main"
 
@@ -109,3 +113,12 @@ forbidden_modules = [
     "audio2map.model",
     "audio2map.features",
 ]
+
+[[tool.importlinter.contracts]]
+name = "v1 evaluation metrics and summaries do not depend on reporting"
+type = "forbidden"
+source_modules = [
+    "audio2map.eval.v1.metrics",
+    "audio2map.eval.v1.summary",
+]
+forbidden_modules = ["audio2map.eval.v1.reporting"]

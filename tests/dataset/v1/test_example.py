@@ -6,9 +6,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import soundfile as sf
 import torch
 
 from audio2map.dataset.v1 import ChartAudio, build_v1_example, collate_v1
+from audio2map.dataset.v1.example import load_chart_audio
 from audio2map.features.audio.v1.constants import DT_MS, N_MELS, SAMPLE_RATE
 from audio2map.features.cond.chart import ChartMeta, ChartMetaVersionError
 from audio2map.features.cond.v1.mask import sample_cond_mask
@@ -16,14 +18,12 @@ from audio2map.features.cond.v1.vec import COND_VEC_NAMES, COND_VEC_VERSION, bui
 from audio2map.model.audio_stem import AudioStem
 from audio2map.model.v1.loss import plain_ce
 from audio2map.model.v1.model import V1ChartModel
-from audio2map.osu.parser import is_mania_4k
 from audio2map.osu.schema import ManiaNote, NoteType
 from audio2map.osu.v1.timing import Redline
 from audio2map.tokens.v1 import cursor_times_ms
 from audio2map.tokens.v1.codec import encode_chart
 from audio2map.tokens.v1.vocab import TOKEN_PAD, build_vocab
 from audio2map.utils.errors import BAD_AUDIO_DURATION, ChartRejected
-from audio2map.utils.paths import raw_dir
 
 
 def _pcm(t_audio_ms: float) -> np.ndarray:
@@ -245,29 +245,30 @@ def test_cached_mel_skips_computing_it(monkeypatch: pytest.MonkeyPatch) -> None:
     assert torch.equal(again.mel, first.mel)
 
 
-def _first_4k_osu() -> Path | None:
-    root = raw_dir()
-    if not root.is_dir():
-        return None
-    for path in root.rglob("*.osu"):
-        try:
-            if is_mania_4k(path):
-                return path
-        except OSError:
-            continue
-    return None
+def test_local_osu_forward_uses_the_eval_mask(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "chart.osu"
+    path.write_text(
+        "osu file format v14\n[General]\nAudioFilename:audio.wav\nMode:3\n"
+        "[Difficulty]\nCircleSize:4\n[TimingPoints]\n0,500,4,2,0,100,1,0\n"
+        "[HitObjects]\n64,192,0,1,0,0:0:0:0:\n"
+    )
+    pcm = np.linspace(-0.5, 0.5, len(_pcm(200.0)), dtype=np.float32)
+    sf.write(tmp_path / "audio.wav", pcm, SAMPLE_RATE, subtype="FLOAT")
 
+    def unexpected_cache(_path):
+        pytest.fail("frozen evaluation must bypass the size-based PCM cache")
 
-def test_local_osu_forward_uses_the_eval_mask() -> None:
-    path = _first_4k_osu()
-    if path is None:
-        pytest.skip("no 4K .osu under the raw data directory")
+    monkeypatch.setattr("audio2map.dataset.v1.example._cached_pcm", unexpected_cache)
+    audio = load_chart_audio(path, use_cache=False)
+    np.testing.assert_array_equal(audio.pcm, pcm)
+    assert audio.audio_key is None
     meta = ChartMeta(osu_path=str(path), official_sr=1.0)
-    batch = build_v1_example(path, meta=meta, cond_mask="none")
+    batch = build_v1_example(audio, meta=meta, cond_mask="none")
     real = torch.from_numpy(build_cond(meta).m_real)
     assert torch.equal(batch.cond_m[0], real)
     model = V1ChartModel()
     model.eval()
-    logits = model(batch)
-    loss = plain_ce(logits, batch.token_ids[:, 1:])
+    with torch.no_grad():
+        logits = model(batch)
+        loss = plain_ce(logits, batch.token_ids[:, 1:])
     assert torch.isfinite(loss)

@@ -100,7 +100,7 @@ _EVENT_NAME = {
 }
 
 
-def _rates(pred: Counter, exp: Counter) -> dict[str, float | int]:
+def match_counts(pred: Counter, exp: Counter) -> dict[str, float | int]:
     tp = fp = fn = 0
     for key in set(pred) | set(exp):
         p, e = pred[key], exp[key]
@@ -154,16 +154,19 @@ def reference_match(
 
     def event_block(pred: Counter, exp: Counter, key_state) -> dict:
         return {
-            "tap": _rates(_subset(pred, lambda k: key_state(k) == "tap"), _subset(exp, lambda k: key_state(k) == "tap")),
-            "hold_head": _rates(
+            "tap": match_counts(
+                _subset(pred, lambda k: key_state(k) == "tap"),
+                _subset(exp, lambda k: key_state(k) == "tap"),
+            ),
+            "hold_head": match_counts(
                 _subset(pred, lambda k: key_state(k) == "hold_head"),
                 _subset(exp, lambda k: key_state(k) == "hold_head"),
             ),
-            "hold_tail": _rates(
+            "hold_tail": match_counts(
                 _subset(pred, lambda k: key_state(k) == "hold_tail"),
                 _subset(exp, lambda k: key_state(k) == "hold_tail"),
             ),
-            "all_event": _rates(pred, exp),
+            "all_event": match_counts(pred, exp),
         }
 
     pred_notes = [TickNote.from_note(n, timing) for n in predicted]
@@ -175,15 +178,15 @@ def reference_match(
 
     def note_block(pred: Counter, exp: Counter, key_type) -> dict:
         return {
-            "tap": _rates(
+            "tap": match_counts(
                 _subset(pred, lambda k: key_type(k) == NoteType.TAP),
                 _subset(exp, lambda k: key_type(k) == NoteType.TAP),
             ),
-            "hold": _rates(
+            "hold": match_counts(
                 _subset(pred, lambda k: key_type(k) == NoteType.HOLD),
                 _subset(exp, lambda k: key_type(k) == NoteType.HOLD),
             ),
-            "all_notes": _rates(pred, exp),
+            "all_notes": match_counts(pred, exp),
         }
 
     return {

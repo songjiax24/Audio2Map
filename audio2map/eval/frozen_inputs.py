@@ -10,6 +10,7 @@ from pathlib import Path
 from audio2map.utils.paths import get_data_root
 
 RANDOM_FULL_SEED = 2028
+V0_RANDOM_FULL_POLICY = "donor_style_target_bpm_v1"
 DIVERSITY_SUBSET_SEED = 2026
 DIVERSITY_SUBSET_COUNT = 100
 UNCONSTRAINED_SUBSET_SEED = 2027

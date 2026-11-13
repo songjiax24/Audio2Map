@@ -1,0 +1,16 @@
+# Whole-chart v1 evaluation. Supply --checkpoint, --motif-vocab and --out.
+# Build the vocabulary once with --mode fit-motifs --split train in a separate output.
+mode: all
+split: val
+device: cuda
+precision: bf16
+workers: 4
+seed: 0
+temperature: 1.0
+scenarios:
+  - matched_full
+  - random_full
+  - matched_partial
+  - random_partial
+  - none
+seeds: [0, 1, 2, 3, 4]

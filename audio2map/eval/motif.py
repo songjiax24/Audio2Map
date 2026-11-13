@@ -141,7 +141,13 @@ def count_pooled_motifs(
     A motif absent from ``vocab`` is not stored; callers that iterate the full
     vocabulary treat a missing key as count 0.
     """
-    seqs = MotifSequences.from_notes(notes, timing)
+    return count_sequence_motifs(MotifSequences.from_notes(notes, timing), vocab)
+
+
+def count_sequence_motifs(
+    seqs: MotifSequences, vocab: dict[str, set[MotifKey]]
+) -> tuple[dict[str, Counter[MotifKey]], dict[str, int]]:
+    """Count an already-built sequence using its caller-owned position units."""
     lane: Counter[MotifKey] = Counter()
     for positions in seqs.lane:
         lane.update(_count_spans(positions, vocab.get("lane", set())))
